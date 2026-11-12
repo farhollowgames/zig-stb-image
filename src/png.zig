@@ -600,6 +600,8 @@ const Png = struct {
         } else {
             // Each entry is written as four bytes, the fourth overwritten by
             // the next pixel; the last pixel, with no next one, gets three.
+            // The header refuses an image of no pixels.
+            std.debug.assert(pixel_count > 0);
             const last = pixel_count - 1;
             for (index_bytes[0..last], 0..) |index, i| {
                 result[i * 3 ..][0..4].* = palette[@as(usize, index) * 4 ..][0..4].*;
@@ -681,6 +683,9 @@ fn predictPixels(
     const lanes = comptime std.math.ceilPowerOfTwoAssert(usize, bpp);
     const Pixel = @Vector(lanes, u8);
     const reads_prior = filter == .avg;
+    // A row is whole pixels: `bpp` is the pixel's bytes at 8 and 16 bits,
+    // and 1 below 8. The last loop takes `bpp` bytes at a time.
+    std.debug.assert(cur.len % bpp == 0);
     const nk = cur.len;
     var a: Pixel = @splat(0);
     var k: usize = 0;
@@ -724,6 +729,8 @@ inline fn predict(
 /// one on the left, in 16-bit lanes, so the chain from one pixel to the next
 /// never widens or narrows.
 fn paethPixels(comptime bpp: usize, cur: []u8, prior: []const u8, in: []const u8) void {
+    // Whole pixels, as in `predictPixels`.
+    std.debug.assert(cur.len % bpp == 0);
     if (bpp == 3) {
         // A byte at a time, three chains side by side: faster here than one
         // chain of 4-lane pixels.

@@ -232,6 +232,9 @@ const Bits = struct {
     /// Reads whole bytes until more than 24 bits are buffered. Callers fill
     /// only below 16 bits.
     inline fn fill(bits: *Bits) void {
+        // Callers fill below 16 bits; the bits never go negative, as every
+        // take is of bits the buffer holds or of the 16 zero bits at the end.
+        std.debug.assert(bits.num_bits >= 0 and bits.num_bits < 16);
         if (bits.input.len - bits.pos < 4) {
             bits.* = fillBytes(bits.*);
             return;

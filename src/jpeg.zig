@@ -235,6 +235,7 @@ const Decoder = struct {
         // them and none is 0xff. Callers come with at most 23 bits, so the
         // loop takes one to four bytes, and they fit the 32. A skip from
         // memory may leave `pos` past `end`, so the test adds to `pos`.
+        std.debug.assert(z.code_bits >= 0 and z.code_bits <= 23);
         const s = z.source;
         if (!z.nomore and s.pos + 4 <= s.end) {
             const word = std.mem.readInt(u32, s.base[s.pos..][0..4], .big);
@@ -292,10 +293,11 @@ const Decoder = struct {
         const temp = z.code_buffer >> 16;
         var k: u32 = fast_bits + 1;
         while (k < 17 and temp >= h.maxcode[k]) k += 1;
-        if (k == 17) {
-            z.code_bits -= 16;
-            return null;
-        }
+        // A code the table does not have. The original also takes 16 bits
+        // here, which can make its count negative; every caller fails on
+        // null, so the port leaves the bits as they are and the count stays
+        // in range.
+        if (k == 17) return null;
         if (k > z.code_bits) return null;
 
         const bits: i32 = @intCast((z.code_buffer >> @intCast(32 - k)) & bmask[k]);
@@ -1928,6 +1930,22 @@ fn idctBlockSse2Lanes(out: []u8, out_stride: usize, data: *const [64]i16) void {
         const o = out[row * out_stride ..][0..8];
         for (o, result) |*sample, value| sample.* = @intCast(std.math.clamp(value, 0, 255));
     }
+}
+
+test "a code the Huffman table does not have leaves the bit count in range" {
+    // Two bytes, a marker: the buffer gets no more bits.
+    var source: Source = .initMemory("\xff\xd9");
+    var z: Decoder = .{ .source = &source, .limits = .{} };
+    // One code, 0 of one bit: every code starting with a 1 is missing.
+    var h: Huffman = .{};
+    var count: [16]u32 = @splat(0);
+    count[0] = 1;
+    try z.buildHuffman(&h, &count);
+    z.code_buffer = 0xe000_0000;
+    z.code_bits = 3;
+    try std.testing.expectEqual(null, z.huffDecode(&h));
+    try std.testing.expect(z.marker == 0xd9);
+    try std.testing.expect(z.code_bits >= 0 and z.code_bits <= 23);
 }
 
 test "the vector SSE2 IDCT gives the samples of the SSE2 IDCT computed lane by lane" {

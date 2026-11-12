@@ -151,7 +151,14 @@ test that fails before the fix where there was a bug. One commit each.
    builds and compares both reason forms. (c) Where the two builds give
    different results on an input that is not a JPEG, the load fails the
    test instead of following one build. All passed at once: no bug.
-5. **Hidden invariants in fast paths:** not started.
+5. **Hidden invariants in fast paths: done.** `std.debug.assert`s: JPEG
+   `growBuffer` (0 <= `code_bits` <= 23), zlib `fill` (0 <= `num_bits` <
+   16), PNG palette expansion (at least one pixel), `predictPixels` and
+   `paethPixels` (whole pixels in a row). `huffDecode` no longer takes 16
+   bits on a missing code, the one path that made `code_bits` negative
+   (every caller fails on it). Test: "a code the Huffman table does not
+   have leaves the bit count in range" (`src/jpeg.zig`), which failed
+   first.
 6. **Benchmark rows through a reader and a file:** not started.
 7. **PNM 16-bit:** not started.
 8. **Docs:** not started.
