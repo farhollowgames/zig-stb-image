@@ -9,11 +9,20 @@ pub const Error = errors.Error;
 /// The limits a load works within. The defaults are stb_image's own: no
 /// side longer than `STBI_MAX_DIMENSIONS`, and no buffer whose size, counted
 /// as stb_image counts it, passes the largest `int`.
+///
+/// They do not bound the memory a load takes. `bytes_max` moves only the
+/// size checks stb_image makes before it allocates an image's buffers. A
+/// PNG's compressed data and its inflated rows are not checked: they grow
+/// as the data arrives, to 2 GiB and 4 GiB, as in the original, however
+/// small the image. To bound memory, give the load an allocator that
+/// fails past the bound.
 pub const Limits = struct {
     /// The longest side, in pixels, a decoder accepts.
     dimension_max: u32 = 1 << 24,
     /// The largest buffer, in bytes, wherever stb_image checks a size against
-    /// `INT_MAX` before it allocates.
+    /// `INT_MAX` before it allocates: the decoded pixels, the buffers a
+    /// decoder sizes from the image (rows, planes, frames, components) and
+    /// the conversions to other components or to floats.
     bytes_max: u64 = std.math.maxInt(i32),
 };
 

@@ -132,3 +132,80 @@ test "Limits.bytes_max: a conversion to more components is checked against the l
         own.deinit(gpa);
     }
 }
+
+const deflate = @import("deflate.zig");
+const png_file = @import("png_file.zig");
+
+/// Records the largest block asked of it.
+const Largest = struct {
+    child: std.mem.Allocator,
+    largest: usize = 0,
+
+    fn allocator(l: *Largest) std.mem.Allocator {
+        return .{ .ptr = l, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.largest = @max(l.largest, len);
+        return l.child.rawAlloc(len, a, ra);
+    }
+
+    fn resize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) bool {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.largest = @max(l.largest, n);
+        return l.child.rawResize(m, a, n, ra);
+    }
+
+    fn remap(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) ?[*]u8 {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.largest = @max(l.largest, n);
+        return l.child.rawRemap(m, a, n, ra);
+    }
+
+    fn free(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.child.rawFree(m, a, ra);
+    }
+};
+
+test "Limits.bytes_max: a PNG's inflated data grows past it, as the original's grows past INT_MAX" {
+    // A 1 x 1 grey PNG whose IDAT inflates to 8 MiB: a literal, then
+    // matches of 258 at distance 1. The original keeps more pixel data
+    // than the image needs, and so does the port.
+    var w: deflate.BitWriter = .init(gpa);
+    defer w.deinit();
+    try w.byte(0x78);
+    try w.byte(0x01);
+    try w.bits(1, 1); // final
+    try w.bits(1, 2); // fixed Huffman
+    try w.code(0x30, 8); // literal 0
+    for (0..(8 << 20) / 258) |_| {
+        try w.code(0b11000101, 8); // length 258
+        try w.code(0, 5); // distance 1
+    }
+    try w.code(0, 7); // end of block
+    const stream = try w.finish();
+    defer gpa.free(stream);
+    const header = png_file.ihdr(.{ .width = 1, .height = 1 });
+    const bytes = try png_file.file(gpa, &.{
+        .{ .kind = "IHDR", .data = &header },
+        .{ .kind = "IDAT", .data = stream },
+        .{ .kind = "IEND" },
+    });
+    defer gpa.free(bytes);
+    try oracle.expectLoadSame(gpa, bytes, .{}, .{ .name = "8 MiB inflate" }, .same);
+
+    var largest: Largest = .{ .child = gpa };
+    const limit = 1 << 20;
+    var loaded = try stbi.loadFromMemory(u8, largest.allocator(), bytes, .{
+        .limits = .{ .bytes_max = limit },
+    });
+    defer loaded.deinit(largest.allocator());
+    try std.testing.expect(largest.largest > limit);
+}

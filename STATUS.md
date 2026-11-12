@@ -134,7 +134,14 @@ test that fails before the fix where there was a bug. One commit each.
    type, the others load" (`test/formats_test.zig`), which `zig build
    test` runs on two builds of the port that leave out each format once
    and build it in once.
-3. **`Limits.bytes_max` and memory:** not started.
+3. **`Limits.bytes_max` and memory: done.** The original's behaviour is
+   kept: `bytes_max` moves only the size checks made before an image's
+   buffers are allocated, not a PNG's compressed data (to 2 GiB) or its
+   inflated rows (to 4 GiB). The doc comment of `Limits` says so, and that
+   an allocator that fails past a bound is the way to bound memory. Test:
+   "Limits.bytes_max: a PNG's inflated data grows past it, as the
+   original's grows past INT_MAX" (from the skeptic's probe, which
+   expected the opposite).
 4. **Comparison holes:** not started.
 5. **Hidden invariants in fast paths:** not started.
 6. **Benchmark rows through a reader and a file:** not started.
