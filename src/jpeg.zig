@@ -1223,28 +1223,96 @@ fn resampleRowGeneric(out: []u8, in_near: []const u8, hs: u32) void {
     for (in_near, 0..) |sample, i| @memset(out[i * hs ..][0..hs], sample);
 }
 
+/// A `@shuffle` mask of `groups` groups of lanes, each `from_a` lanes of
+/// the first vector and then `from_b` of the second, starting at group
+/// `first` of each.
+fn zip(
+    comptime groups: usize,
+    comptime from_a: usize,
+    comptime from_b: usize,
+    comptime first: usize,
+) @Vector(groups * (from_a + from_b), i32) {
+    var mask: [groups * (from_a + from_b)]i32 = undefined;
+    for (0..groups) |j| {
+        const group = mask[j * (from_a + from_b) ..][0 .. from_a + from_b];
+        for (group[0..from_a], 0..) |*lane, t| lane.* = @intCast((first + j) * from_a + t);
+        for (group[from_a..], 0..) |*lane, t| {
+            lane.* = ~@as(i32, @intCast((first + j) * from_b + t));
+        }
+    }
+    return mask;
+}
+
 fn float2fixed(comptime x: f32) i32 {
     return @as(i32, @intFromFloat(x * 4096.0 + 0.5)) << 8;
 }
 
+/// Samples converted at once by the vector colour conversion and
+/// upsampling.
+const lanes = 16;
+const U8xN = @Vector(lanes, u8);
+const U16xN = @Vector(lanes, u16);
+const I32xN = @Vector(lanes, i32);
+
 /// `stbi__YCbCr_to_RGB_row`: a reduced-precision conversion, the one the
-/// original's SIMD paths also compute.
+/// original's SIMD paths also compute, into `step` (3 or 4) bytes a pixel.
 fn ycbcrToRgbRow(out: []u8, y: []const u8, pcb: []const u8, pcr: []const u8, step: u32) void {
-    const high_half: i32 = @bitCast(@as(u32, 0xffff0000));
-    for (y, pcb, pcr, 0..) |luma, blue, red, i| {
-        const y_fixed = (@as(i32, luma) << 20) + (1 << 19); // rounding
-        const cr = @as(i32, red) - 128;
-        const cb = @as(i32, blue) - 128;
-        const cb_green = (cb * -float2fixed(0.34414)) & high_half;
-        const r = (y_fixed + cr * float2fixed(1.40200)) >> 20;
-        const g = (y_fixed + cr * -float2fixed(0.71414) + cb_green) >> 20;
-        const b = (y_fixed + cb * float2fixed(1.77200)) >> 20;
-        const o = out[i * step ..][0..step];
-        o[0] = @intCast(std.math.clamp(r, 0, 255));
-        o[1] = @intCast(std.math.clamp(g, 0, 255));
-        o[2] = @intCast(std.math.clamp(b, 0, 255));
-        if (step == 4) o[3] = 255;
+    switch (step) {
+        3 => ycbcrToRgb(3, out, y, pcb, pcr),
+        4 => ycbcrToRgb(4, out, y, pcb, pcr),
+        else => unreachable,
     }
+}
+
+fn ycbcrToRgb(
+    comptime step: usize,
+    out: []u8,
+    y: []const u8,
+    pcb: []const u8,
+    pcr: []const u8,
+) void {
+    var i: usize = 0;
+    while (i + lanes <= y.len) : (i += lanes) {
+        const luma = y[i..][0..lanes].*;
+        const pixels = ycbcrPixels(step, luma, pcb[i..][0..lanes].*, pcr[i..][0..lanes].*);
+        out[i * step ..][0 .. lanes * step].* = pixels;
+    }
+    // The last few pixels, through zero-filled copies.
+    const rest = y.len - i;
+    if (rest == 0) return;
+    var parts: [3][lanes]u8 = @splat(@splat(0));
+    for (&parts, [_][]const u8{ y, pcb, pcr }) |*part, samples| {
+        @memcpy(part[0..rest], samples[i..]);
+    }
+    const pixels = ycbcrPixels(step, parts[0], parts[1], parts[2]);
+    @memcpy(out[i * step ..][0 .. rest * step], pixels[0 .. rest * step]);
+}
+
+/// `lanes` pixels' colour, interleaved; the alpha of RGBA is 255.
+fn ycbcrPixels(comptime step: usize, luma: U8xN, blue: U8xN, red: U8xN) [lanes * step]u8 {
+    const splat = struct {
+        fn f(x: i32) I32xN {
+            return @splat(x);
+        }
+    }.f;
+    const y_fixed = (@as(I32xN, luma) << @splat(20)) + splat(1 << 19); // rounding
+    const cr = @as(I32xN, red) - splat(128);
+    const cb = @as(I32xN, blue) - splat(128);
+    const high_half: i32 = @bitCast(@as(u32, 0xffff0000));
+    const cb_green = (cb * splat(-float2fixed(0.34414))) & splat(high_half);
+    const r = (y_fixed + cr * splat(float2fixed(1.40200))) >> @splat(20);
+    const g = (y_fixed + cr * splat(-float2fixed(0.71414)) + cb_green) >> @splat(20);
+    const b = (y_fixed + cb * splat(float2fixed(1.77200))) >> @splat(20);
+    const clamp = struct {
+        fn f(x: I32xN) U8xN {
+            return @intCast(@min(@max(x, splat(0)), splat(255)));
+        }
+    }.f;
+    const rg = @shuffle(u8, clamp(r), clamp(g), zip(lanes, 1, 1, 0));
+    if (step == 3) return @shuffle(u8, rg, clamp(b), zip(lanes, 2, 1, 0));
+    const alpha: U8xN = @splat(255);
+    const ba = @shuffle(u8, clamp(b), alpha, zip(lanes, 1, 1, 0));
+    return @shuffle(u8, rg, ba, zip(lanes, 2, 2, 0));
 }
 
 /// `stbi__blinn_8x8`: `x * y / 255`, rounded.
@@ -1593,8 +1661,8 @@ fn idctPassSse2(s: [8]I16x8, comptime bias: i32, comptime shift: u5) [8]I16x8 {
 fn transpose(rows: [8]I16x8) [8]I16x8 {
     // `_mm_unpacklo_epi16` and `_mm_unpackhi_epi16`: lanes taken in turn
     // from the low or high halves of `x` and `y` (`~i` is `y`'s lane `i`).
-    const low = comptime interleave(0);
-    const high = comptime interleave(4);
+    const low = comptime zip(4, 1, 1, 0);
+    const high = comptime zip(4, 1, 1, 4);
     var r = rows;
     inline for ([_][4][2]usize{
         .{ .{ 0, 4 }, .{ 1, 5 }, .{ 2, 6 }, .{ 3, 7 } },
@@ -1609,16 +1677,6 @@ fn transpose(rows: [8]I16x8) [8]I16x8 {
         }
     }
     return r;
-}
-
-fn interleave(comptime first: i32) @Vector(8, i32) {
-    var mask: [8]i32 = undefined;
-    for (0..4) |i| {
-        const lane = first + @as(i32, @intCast(i));
-        mask[2 * i] = lane;
-        mask[2 * i + 1] = ~lane;
-    }
-    return mask;
 }
 
 /// `stbi__idct_simd`: the block's samples as the original's SSE2 build
@@ -1762,5 +1820,49 @@ test "the vector SSE2 IDCT gives the samples of the SSE2 IDCT computed lane by l
         idctBlockSse2Lanes(&expected, 11, &data);
         idctBlockSse2(&actual, 11, &data);
         try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
+}
+
+/// `stbi__YCbCr_to_RGB_row` one pixel at a time: the reference for
+/// `ycbcrToRgbRow`'s vector code.
+fn ycbcrToRgbPixel(out: []u8, luma: u8, blue: u8, red: u8) void {
+    const high_half: i32 = @bitCast(@as(u32, 0xffff0000));
+    const y_fixed = (@as(i32, luma) << 20) + (1 << 19);
+    const cr = @as(i32, red) - 128;
+    const cb = @as(i32, blue) - 128;
+    const cb_green = (cb * -float2fixed(0.34414)) & high_half;
+    const r = (y_fixed + cr * float2fixed(1.40200)) >> 20;
+    const g = (y_fixed + cr * -float2fixed(0.71414) + cb_green) >> 20;
+    const b = (y_fixed + cb * float2fixed(1.77200)) >> 20;
+    out[0] = @intCast(std.math.clamp(r, 0, 255));
+    out[1] = @intCast(std.math.clamp(g, 0, 255));
+    out[2] = @intCast(std.math.clamp(b, 0, 255));
+    if (out.len == 4) out[3] = 255;
+}
+
+test "the vector YCbCr conversion gives the bytes of the scalar one for every colour" {
+    var luma: [256 + 9]u8 = undefined;
+    for (&luma, 0..) |*y, i| y.* = @truncate(i * 7);
+    var blue: [luma.len]u8 = undefined;
+    var red: [luma.len]u8 = undefined;
+    var expected: [luma.len * 4]u8 = undefined;
+    var actual: [luma.len * 4 + 1]u8 = undefined;
+    for (0..256) |cb| {
+        for (0..256) |cr| {
+            // Each row has every luma; its length leaves a part vector.
+            const len = 256 + (cb + cr) % 10;
+            @memset(blue[0..len], @intCast(cb));
+            @memset(red[0..len], @intCast(cr));
+            for ([_]u32{ 3, 4 }) |step| {
+                const size = len * step;
+                for (0..len) |i| {
+                    ycbcrToRgbPixel(expected[i * step ..][0..step], luma[i], blue[i], red[i]);
+                }
+                actual[size] = 0xaa;
+                ycbcrToRgbRow(actual[0..size], luma[0..len], blue[0..len], red[0..len], step);
+                try std.testing.expectEqualSlices(u8, expected[0..size], actual[0..size]);
+                try std.testing.expectEqual(0xaa, actual[size]);
+            }
+        }
     }
 }
