@@ -28,11 +28,19 @@
   - choices: the PNG and BMP palette cases could read unset entries as
     zero instead of refusing; `-Djpeg-idct` defaults to scalar, where
     upstream's x86-64 default is SSE2.
-- **Open:** the sanitizer run, now one process per call (an overrun of the
-  original corrupted the heap and ended the earlier run in the GIF tests),
-  takes longer than the 50-minute build limit and has not finished. The
-  partial run flagged GIF animations, PIC loads and two damaged PNGs; they
-  are not yet matched against the refusals the tests expect.
+- **Open:** the sanitizer run is now one process per call (an overrun of
+  the original corrupted the heap and ended the earlier whole run in the
+  GIF tests), and the whole run takes longer than the 50-minute build
+  limit. Run per test file, it has finished for GIF (23,277 calls, 339
+  flagged, all GIF animations: flipped with fewer than 4 components, and
+  disposal cases) and for PIC and HDR (1,838 flagged: PIC loads that
+  convert the NULL a failed scanline gives, as `doc/parity.md` says; four
+  flagged `is_hdr` queries on PIC tests look misattributed). The flagged
+  calls are not yet matched one by one against the refusals the tests
+  expect, and the other test files are not yet run. AddressSanitizer does
+  not see reads of memory never written (the palette, TGA, HDR and JPEG
+  refusals); those cases rest on reading the C and, for JPEG, on the
+  three-fill check.
 - **Next:** steps 5 to 7 (see "Work in progress").
 
 Every public function, build option and format of stb_image 2.30 (stb
