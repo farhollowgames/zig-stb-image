@@ -116,20 +116,25 @@ performance pass, the skeptic's review, the fixes) are not started.
 ### Performance: PNG and zlib
 
 On branch `perf/png` (worktree `~/Projects/zig-stb-image.wt/perf-png`).
-Rows' ratios now (port time / original SSE2 time, best of 3 rounds): zlib
-inflate 0.82; png rgb 0.81, rgba 0.83, grey 0.69, rgb 16-bit 0.82, adam7
-0.79, palette 0.62, rgb to rgba 0.81, rgb to float 0.90.
+Rows' ratios now (port time / original SSE2 time, the full table, best of
+3 rounds): zlib inflate 0.82; png rgb 0.79, rgba 0.80, grey 0.71, rgb
+16-bit 0.83, adam7 0.82, palette 0.62, rgb to rgba 0.81, rgb to float 0.91.
+The full test run passes (162 tests).
 
 - **Kept:** inflate's Huffman loop keeps its bit buffer in locals and fills
   it with one 32-bit load; rows unfilter a pixel at a time per pixel size
   (`unfilterPixels`, `predictPixels`, `paethPixels` in `src/png.zig`);
   palette expansion checks the largest index once and copies 4-byte entries.
-- **Dropped:** copying matches eight bytes at a time (no measurable gain);
-  Paeth as vectors for 3-byte pixels, and as scalars for every size.
-- **Left:** the 16-bit byte swap as vectors; the RGB-to-RGBA alpha
-  expansion as shuffles; unfiltering straight into the image to drop the
-  row copy; `decodeAlloc`'s shrinking `realloc` costs nothing with the C
-  allocator (an in-place shrink), and the 1 MiB IDAT pieces are left.
+- **Dropped (measured: no gain beyond noise, or a loss):** copying matches
+  eight bytes at a time; a 2048-entry fast Huffman table (11 bits, not 9);
+  Paeth as vectors for 3-byte pixels, and as scalars for every size; the
+  16-bit byte swap as `@byteSwap` vectors; RGB-to-RGBA alpha expansion as
+  shuffles; unfiltering 8-bit rows straight into the image to drop the
+  row copy.
+- **Allocation:** `decodeAlloc`'s shrinking `realloc` costs nothing with
+  the C allocator (an in-place shrink); the 1 MiB IDAT pieces cost one
+  copy of the compressed data, small beside inflate, and are kept.
+- **Left:** nothing in this area; every row is faster than the original.
 - **Resume:** `zig build bench -- --filter png --rounds 3` (and `--filter
   zlib`) through the build wrapper; tests with `-Dtest-filter=zlib
   -Dtest-filter=png -Dtest-filter=PNG -Dtest-filter=DEFLATE`. Rows of one
