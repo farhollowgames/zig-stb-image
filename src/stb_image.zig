@@ -134,13 +134,21 @@ pub fn loadFromFile(
     comptime checkSample(T);
     var source: Source = undefined;
     source.initReader(&file_reader.interface);
-    var image = try loadSource(T, gpa, &source, &options);
-    if (T != f32) {
-        errdefer image.deinit(gpa);
-        // Give back what the source buffered but did not use.
-        try file_reader.seekBy(-@as(i64, @intCast(source.end - source.pos)));
-    }
+    // Where a skip passed the end of the file, a `FILE` is past it too.
+    var image = loadSource(T, gpa, &source, &options) catch |err| {
+        if (source.skip_overshoot != 0) try file_reader.seekBy(overshoot(&source));
+        return err;
+    };
+    errdefer image.deinit(gpa);
+    var move = overshoot(&source);
+    // Give back what the source buffered but did not use.
+    if (T != f32) move -= @intCast(source.end - source.pos);
+    if (move != 0) try file_reader.seekBy(move);
     return image;
+}
+
+fn overshoot(source: *const Source) i64 {
+    return std.math.cast(i64, source.skip_overshoot) orelse std.math.maxInt(i64);
 }
 
 pub const PathError = FileError || std.Io.File.OpenError;

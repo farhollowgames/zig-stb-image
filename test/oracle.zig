@@ -387,7 +387,11 @@ pub fn expectQuerySame(
                 .file => stbi.infoFromFile(&file_reader),
             };
             if (found) |info| {
-                if (r == 0 or info.width != theirs.x or info.height != theirs.y or
+                // The original's sizes are `int`s, which BMP and PSD fill
+                // with the stored 32 bits; the port reports the same bits.
+                const x: u32 = @bitCast(theirs.x);
+                const y: u32 = @bitCast(theirs.y);
+                if (r == 0 or info.width != x or info.height != y or
                     info.channels_in_file != theirs.comp)
                 {
                     label.print(request, "info: {d} {d}x{d}x{d} against the port's {d}x{d}x{d}", .{
@@ -431,19 +435,25 @@ pub fn expectQuerySame(
 /// component count from memory, flipped and not, and a sample through the
 /// reader and from a file.
 pub fn expectAllSame(gpa: std.mem.Allocator, bytes: []const u8, label: Label) !void {
+    return expectAll(gpa, bytes, label, .same);
+}
+
+/// As `expectAllSame`, with every load expected as `expect` says; the
+/// queries are always compared.
+pub fn expectAll(gpa: std.mem.Allocator, bytes: []const u8, label: Label, expect: Expect) !void {
     for ([_]Bits{ .u8, .u16, .f32 }) |bits| {
         for (0..5) |comp| {
             try expectLoadSame(gpa, bytes, .{
                 .bits = bits,
                 .options = .{ .components = @fromBackingInt(@as(u3, @intCast(comp))) },
-            }, label, .same);
+            }, label, expect);
         }
         try expectLoadSame(gpa, bytes, .{
             .bits = bits,
             .options = .{ .flip_vertically = true },
-        }, label, .same);
-        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .callbacks }, label, .same);
-        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .file, .file_offset = 3 }, label, .same);
+        }, label, expect);
+        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .callbacks }, label, expect);
+        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .file, .file_offset = 3 }, label, expect);
     }
     for ([_]Query{ .info, .is_16_bit, .is_hdr }) |query| {
         for ([_]Via{ .memory, .callbacks, .file }) |via| try expectQuerySame(bytes, query, via, label);
