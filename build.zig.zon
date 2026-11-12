@@ -1,0 +1,47 @@
+.{
+    .name = .stb_image,
+    .version = "0.0.0",
+    .fingerprint = 0xe5d360785ac00371, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        // Test images, fetched only for this repository's own tests.
+        // stb itself at the pinned commit, for the PngSuite and PNM files.
+        .stb = .{
+            .url = "git+https://github.com/nothings/stb#a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d",
+            .hash = "N-V-__8AAFNETgDxQPwefsoBQhY7el1SUgPWt8Q8IYvZyOt9",
+            .lazy = true,
+        },
+        // JPEG test images: baseline, progressive, restart markers, odd
+        // sizes and samplings, and crash cases.
+        .jpeg_decoder = .{
+            .url = "git+https://github.com/image-rs/jpeg-decoder#eb2d7c0f6a2d0298aba7a7f8b9ca1440353e8f8c",
+            .hash = "N-V-__8AAKoVRQHy6TfecXi5fQcN7sQ1u46Kz-AsOX8vN0D0",
+            .lazy = true,
+        },
+        // BMP (bmpsuite), GIF, HDR, TGA, PNM and more PNG and JPEG files.
+        .image_rs = .{
+            .url = "git+https://github.com/image-rs/image#e70e9fe5073f4b298a33b72993847241a8eaaca6",
+            .hash = "N-V-__8AAN0w_ABT1VX_dByw1YkuNMQ4xpdjcac7izigthdd",
+            .lazy = true,
+        },
+        // PSD files.
+        .psd_tools = .{
+            .url = "git+https://github.com/psd-tools/psd-tools#3c1bde419970b2aa14046884728065127d75fd86",
+            .hash = "N-V-__8AACtPCgScZeJwttjj2rKKBDjQYTKEfqydMQi3zFtg",
+            .lazy = true,
+        },
+        // libjpeg-turbo 3.2.1's test images, the reference JPEG library's.
+        .libjpeg_turbo = .{
+            .url = "git+https://github.com/libjpeg-turbo/libjpeg-turbo?ref=3.2.1#7b4993786d856cbccabfc0ed2f923ba000e326cc",
+            .hash = "N-V-__8AAAVkjgBikl3Ru7KXHzLzHtCuqVjI3rwEayF7Y3EQ",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
