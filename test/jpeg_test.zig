@@ -1351,9 +1351,7 @@ test "jpeg: fuzzed progressive JPEGs load as in the original" {
 }
 
 /// Fuzz cases whose coefficients overflow an `int` in the original's
-/// scalar IDCT. The sanitizer reports each overflow check only once per
-/// run, so each case was confirmed alone with
-/// `zig build sanitize -Dfuzz-replay=<case>`.
+/// scalar IDCT: the calls `zig build sanitize` flags in this test.
 const baseline_idct_overflows = [_]fuzz.Unsafe{
     .{ .case = 12, .call = .load },
     .{ .case = 17, .call = .load },

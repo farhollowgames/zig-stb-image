@@ -33,7 +33,7 @@ if [ -s "$out/frames.raw" ]; then
     paste -d '\t' - - | paste -d '\t' "$out/frames.raw" - > "$out/frames.map"
 fi
 awk -F '\t' '
-  NR == FNR { name[$1] = $2 " " $3; next }
+  FILENAME == ARGV[1] { name[$1] = $2 " " $3; next }
   {
     if (match($0, /libstb_image_sanitize\.so\+0x[0-9a-f]+/)) {
       key = substr($0, RSTART, RLENGTH)

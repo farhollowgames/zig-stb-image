@@ -82,6 +82,7 @@ pub fn build(b: *std.Build) void {
         .fuzz_seed = fuzz_seed,
         .fuzz_replay = fuzz_replay,
         .sanitize = false,
+        .jpeg_idct = jpeg_idct,
     });
     differential.root_module.linkLibrary(oracleLibrary(b, target, .simd));
     differential.root_module.linkLibrary(oracleLibrary(b, target, .scalar));
@@ -92,6 +93,7 @@ pub fn build(b: *std.Build) void {
         .fuzz_seed = fuzz_seed,
         .fuzz_replay = fuzz_replay,
         .sanitize = true,
+        .jpeg_idct = jpeg_idct,
     });
 
     addBench(b, target, format_module);
@@ -150,6 +152,8 @@ const TestConfig = struct {
     fuzz_seed: u64,
     fuzz_replay: ?u64,
     sanitize: bool,
+    /// The IDCT the port follows, which names the sanitizer run's output.
+    jpeg_idct: JpegIdct,
 };
 
 fn differentialTest(
@@ -244,7 +248,10 @@ fn addSanitize(
     const install = b.addInstallDirectory(.{
         .source_dir = out,
         .install_dir = .prefix,
-        .install_subdir = b.fmt("sanitize/{s}", .{runName(b, config.filters)}),
+        .install_subdir = b.fmt("sanitize/{s}{s}", .{
+            runName(b, config.filters),
+            if (config.jpeg_idct == .scalar) "+jpeg-idct-scalar" else "",
+        }),
     });
     step.dependOn(&install.step);
 }

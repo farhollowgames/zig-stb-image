@@ -7,7 +7,11 @@ except for a BMP palette entry the original never read, which the port
 reads as zero.
 Each such case has a test, and the fuzz tests list the cases they generate
 in their `.unsafe` lists (`test/<format>_unsafe.zig`). The author has
-approved each case.
+approved each case. `zig build sanitize` runs every test's calls to the
+original under AddressSanitizer and UndefinedBehaviorSanitizer and checks
+what the port does on each call they flag; the port refuses every one but
+the two harmless cases below (the empty IDAT, and the scalar IDCT overflow
+on the SSE2 port), see `TESTING.md`.
 
 ## zlib
 

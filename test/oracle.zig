@@ -712,13 +712,13 @@ fn sanitizeCall(
 ) !void {
     var label_buffer: [256]u8 = undefined;
     const text = try sanitizeLabel(&label_buffer, label, request, call);
-    sanitizeStart(text);
+    const number = sanitizeStart(text);
     const original: OriginalCall = .{ .bytes = bytes, .request = request, .call = call };
     const flags = try runOriginal(OriginalCall, &original, OriginalCall.run, &.{ .simd, .scalar });
     if (!flags.any()) return;
     var outcome_buffer: [64]u8 = undefined;
     const outcome = try portOutcome(gpa, &outcome_buffer, bytes, request, call);
-    flags.print(text, outcome);
+    flags.print(number, text, outcome);
 }
 
 /// The call's name in the sanitizer's report: the input, the call and the
@@ -742,9 +742,16 @@ fn sanitizeLabel(buffer: []u8, label: Label, request: Request, call: SanitizeCal
     return writer.buffered();
 }
 
-/// Prints the `stbi-call:` line that counts a call of the sanitizer run.
-pub fn sanitizeStart(label: []const u8) void {
-    std.debug.print("stbi-call: {s}\n", .{label});
+/// The calls of the sanitizer run so far. The labels of hand-made inputs
+/// repeat, so each call is told apart by its number.
+var sanitize_calls: u64 = 0;
+
+/// Prints the `stbi-call:` line that counts a call of the sanitizer run,
+/// and returns the call's number.
+pub fn sanitizeStart(label: []const u8) u64 {
+    sanitize_calls += 1;
+    std.debug.print("stbi-call: #{d} {s}\n", .{ sanitize_calls, label });
+    return sanitize_calls;
 }
 
 /// One call to the original, as a child process of the sanitizer run makes
@@ -872,21 +879,22 @@ pub const Flags = struct {
         return false;
     }
 
-    /// One `stbi-flagged:` line per flagged build: the call, the build, the
-    /// report and what the port does (`outcome`).
-    pub fn print(flags: *const Flags, label: []const u8, outcome: []const u8) void {
+    /// One `stbi-flagged:` line per flagged build: the call's number and
+    /// label, the build, the report and what the port does (`outcome`).
+    pub fn print(flags: *const Flags, number: u64, label: []const u8, outcome: []const u8) void {
         for (std.enums.values(Path)) |path| {
             const report = flags.reports.getPtrConst(path).* orelse continue;
-            std.debug.print("stbi-flagged: {s} | {t} | {s} | port {s}\n", .{
-                label, path, report.text(), outcome,
+            std.debug.print("stbi-flagged: #{d} {s} | {t} | {s} | port {s}\n", .{
+                number, label, path, report.text(), outcome,
             });
         }
     }
 };
 
 /// The seconds a child may run before it is stopped and counted as
-/// flagged: the original loops for ever on some inputs.
-const child_seconds = 120;
+/// flagged: the original loops for ever on some inputs (a zlib initial
+/// size of 0); every other call takes a small part of that.
+const child_seconds = 20;
 
 /// Runs `call(context, path)` for each of `builds` in a child process with
 /// the sanitizers set to stop at the first report, so a flag ends the child
@@ -1000,9 +1008,14 @@ fn describeReport(writer: *std.Io.Writer, text: []const u8, status: u32) !void {
         if (W.IFSIGNALED(status)) {
             const signal = W.TERMSIG(status);
             const what = if (signal == .ALRM) "timed out" else "died";
-            return writer.print("{s}, signal {d}, no report", .{ what, @backingInt(signal) });
+            try writer.print("{s}, signal {d}", .{ what, @backingInt(signal) });
+        } else {
+            try writer.print("exited with {d}", .{W.EXITSTATUS(status)});
         }
-        return writer.print("exited with {d}, no report", .{W.EXITSTATUS(status)});
+        // Whatever else the child printed, such as a failed assert.
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        const first = lines.next() orelse return writer.print(", no output", .{});
+        return writer.print(": {s}", .{first});
     };
     if (std.mem.indexOf(u8, line, "runtime error:")) |at| {
         // "<dir>/stb_image.h:1234:5: runtime error: ...": the file's own name.
@@ -1013,7 +1026,7 @@ fn describeReport(writer: *std.Io.Writer, text: []const u8, status: u32) !void {
     } else {
         const start = std.mem.indexOf(u8, line, "AddressSanitizer").?;
         var kind = line[start..];
-        for ([_][]const u8{ " on ", " at ", " (" }) |cut| {
+        for ([_][]const u8{ " on ", " at ", " (", " \"" }) |cut| {
             if (std.mem.indexOf(u8, kind, cut)) |at| kind = kind[0..at];
         }
         try writer.print("{s}", .{kind});

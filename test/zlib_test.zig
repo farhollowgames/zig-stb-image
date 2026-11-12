@@ -189,7 +189,7 @@ fn sanitize(
         "{s}: zlib {t}, initial {d}, header {}, buffer {d}",
         .{ label, call.function, call.initial_size, call.parse_header, call.buffer_len },
     );
-    oracle.sanitizeStart(text);
+    const number = oracle.sanitizeStart(text);
     const Original = struct {
         input: []const u8,
         call: Call,
@@ -210,7 +210,7 @@ fn sanitize(
         if (!call.function.isBuffer()) gpa.free(bytes);
         break :blk try std.fmt.bufPrint(&outcome_buffer, "accepts {d} bytes", .{bytes.len});
     } else |err| try oracle.refusal(&outcome_buffer, err);
-    flags.print(text, outcome);
+    flags.print(number, text, outcome);
 }
 
 fn span(reason: ?[*:0]const u8) ?[]const u8 {
@@ -729,9 +729,14 @@ test "zlib: initial sizes of 0 and 1 grow as in the original" {
     for (try encodings(arena, xs, true)) |encoded| {
         const call: Call = .{ .function = .malloc_guesssize, .initial_size = 1 };
         try expectSame(encoded, call, "5000 bytes, size 1");
-        // The original would loop for ever here; the port fails.
+        // The original would loop for ever here; the port fails. The
+        // sanitizer run's child processes stop the original after a time.
         const result = zlib.decodeAlloc(gpa, encoded, .{ .initial_size = 0 });
         try std.testing.expectError(error.OutOfMemory, result);
+        if (fuzz_options.sanitize) {
+            const zero: Call = .{ .function = .malloc_guesssize, .initial_size = 0 };
+            try expectSame(encoded, zero, "5000 bytes, size 0");
+        }
     }
 }
 
