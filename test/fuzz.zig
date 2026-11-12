@@ -205,3 +205,44 @@ pub fn run(gpa: std.mem.Allocator, config: Config, inputs: []const []const u8) !
         }
     }
 }
+
+/// Checks that the port refuses every load in `config.unsafe` with one of
+/// `refusals`, the errors it gives where the original is unsafe.
+pub fn expectUnsafeRefused(
+    gpa: std.mem.Allocator,
+    config: Config,
+    inputs: []const []const u8,
+    refusals: []const anyerror,
+) !void {
+    if (fuzz_options.fuzz_seed != 0 or fuzz_options.sanitize) return;
+    for (config.unsafe) |entry| {
+        if (entry.call != .load) continue;
+        const case = try makeCase(gpa, config, entry.case, inputs);
+        defer gpa.free(case.bytes);
+        // From memory and at 8 bits: a float load reports any failure as
+        // an unknown image type.
+        if (stbi.loadFromMemory(u8, gpa, case.bytes, case.request.options)) |image| {
+            var copy = image;
+            copy.deinit(gpa);
+        } else |err| {
+            for (refusals) |refusal| {
+                if (err == refusal) break;
+            } else {
+                const name = config.name;
+                std.debug.print("\n[{s} case {d}] refused with {t}\n", .{ name, entry.case, err });
+                return error.TestUnexpectedResult;
+            }
+            continue;
+        }
+        const name = config.name;
+        std.debug.print("\n[{s} case {d}] listed as unsafe, but decodes\n", .{ name, entry.case });
+        return error.TestUnexpectedResult;
+    }
+}
+
+/// The `Unsafe` entries of loads, from their case numbers.
+pub fn unsafeLoads(comptime cases: []const u32) [cases.len]Unsafe {
+    var list: [cases.len]Unsafe = undefined;
+    for (cases, &list) |case, *entry| entry.* = .{ .case = case, .call = .load };
+    return list;
+}

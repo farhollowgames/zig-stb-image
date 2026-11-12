@@ -29,8 +29,6 @@ fn expectCorpus(root: corpus.Root, sub_dir: []const u8) !usize {
     var set = try corpus.load(gpa, std.testing.io, root, sub_dir, &.{ ".jpg", ".jpeg" });
     defer set.deinit(gpa);
     for (set.entries) |entry| {
-        // A PNG named .jpg; the PNG tests cover it.
-        if (std.mem.startsWith(u8, entry.bytes, "\x89PNG")) continue;
         const overflows = for (idct_overflows) |name| {
             if (std.mem.endsWith(u8, entry.name, name)) break true;
         } else false;
@@ -1230,10 +1228,7 @@ test "jpeg: a JPEG cut short anywhere in its segments or scans loads as in the o
             else
                 0;
             for ([_]usize{ 0, 1, 2, 3, 4, 2 + length / 2, 2 + length }) |cut| {
-                // Under 4 bytes the result from a reader turns on the PSD
-                // signature check, which reads 4 bytes and, at the end,
-                // overwrites the first byte it buffered.
-                if (i + cut >= 4 and i + cut < bytes.len) try cuts.append(gpa, i + cut);
+                if (i + cut < bytes.len) try cuts.append(gpa, i + cut);
             }
         }
         for (1..8) |eighth| try cuts.append(gpa, bytes.len * eighth / 8);

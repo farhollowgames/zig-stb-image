@@ -51,14 +51,14 @@ picks it up; the git log has the detail.
 | PNG Adam7 interlace | as above | as above | as above | oracle-tested |
 | PNG iPhone CgBI, BGR conversion and unpremultiply | `stbi__de_iphone` | as above | "png: the iPhone images …", "png: iPhone PNGs convert to RGB and unpremultiply …", "fuzz: mutated PNGs …" | oracle-tested |
 | zlib (inflate) | `stbi__zbuf`, `stbi__parse_zlib` | `src/zlib.zig` | "zlib: every block type and block size …", "zlib: corrupt, truncated and odd streams …", "zlib: zero bits past the end …", "zlib: initial sizes of 0 and 1 …", "zlib: the IDAT streams of the PNG corpus …", "fuzz: mutated zlib and raw DEFLATE streams …", "zlib: each allocation failure …" | oracle-tested |
-| TGA | `stbi__tga_*` | `src/tga.zig` | | not started |
-| BMP | `stbi__bmp_*` | `src/bmp.zig` | | not started |
-| PSD (composited image, 8 and 16 bits, RLE and raw) | `stbi__psd_*` | `src/psd.zig` | | not started |
-| GIF, first frame | `stbi__gif_load` | `src/gif.zig` | | not started |
-| GIF, every frame | `stbi_load_gif_from_memory` | `loadGifFromMemory` | | not started |
-| HDR (Radiance RGBE, RLE and flat) | `stbi__hdr_*` | `src/hdr.zig` | | not started |
-| PIC (Softimage) | `stbi__pic_*` | `src/pic.zig` | | not started |
-| PNM (binary PGM and PPM, 8 and 16 bits) | `stbi__pnm_*` | `src/pnm.zig` | | not started |
+| TGA | `stbi__tga_*` | `src/tga.zig` | `test/tga_test.zig`: the TGA test suite, every image type, depth and origin, packets of every length, colour maps, headers, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
+| BMP | `stbi__bmp_*` | `src/bmp.zig` | `test/bmp_test.zig`: bmpsuite and libjpeg-turbo files, every header size and depth, bit-field masks of every width, zero alpha, palette sizes, bad headers, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
+| PSD (composited image, 8 and 16 bits, RLE and raw) | `stbi__psd_*` | `src/psd.zig` | `test/psd_test.zig`: the psd-tools PSD and PSB files, channel counts 0 to 56 at both depths and compressions, PackBits of every length byte, header fields, largest sizes, the 16-bit request and query, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
+| GIF, first frame | `stbi__gif_load` | `src/gif.zig` | `test/gif_test.zig`: the corpus, every LZW code size and stream shape, full code tables, corrupt rasters, interlace, palettes and transparency, frames off the canvas, extensions, headers, truncation, limits, allocation failures, 2,000 fuzz cases | oracle-tested |
+| GIF, every frame | `stbi_load_gif_from_memory` | `loadGifFromMemory` | as above, every test also as an animation: every disposal method, delays, frames kept after a failure; refusals in `doc/parity.md` | oracle-tested |
+| HDR (Radiance RGBE, RLE and flat) | `stbi__hdr_*` | `src/hdr.zig` | `test/hdr_test.zig`: the corpus, RLE and flat sizes, the old RLE form, bad runs, every header form, long header lines, truncation, gammas and scales, limits, allocation failures, 2,000 fuzz cases | oracle-tested |
+| PIC (Softimage) | `stbi__pic_*` | `src/pic.zig` | `test/pic_test.zig`: every packet type and channel layout, empty images, bad packets, overrunning and short scanlines, truncation, headers and info, limits, allocation failures, 3,000 fuzz cases | oracle-tested |
+| PNM (binary PGM and PPM, 8 and 16 bits) | `stbi__pnm_*` | `src/pnm.zig` | `test/pnm_test.zig`: stb, libjpeg-turbo and image-rs files, every maximum value, whitespace and comments, numbers at the edge of an int, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
 
 ## Functions
 
@@ -68,7 +68,7 @@ picks it up; the git log has the detail.
 | `stbi_load_from_callbacks`, `stbi_load_16_from_callbacks`, `stbi_loadf_from_callbacks`, `stbi_io_callbacks` | `loadFromReader` on a `*std.Io.Reader` | corpus files; fuzz cases | ported |
 | `stbi_load_from_file`, `stbi_load_from_file_16`, `stbi_loadf_from_file` | `loadFromFile` on a `*std.Io.File.Reader`, leaving it where the original leaves the `FILE` | corpus files; fuzz cases | ported |
 | `stbi_load`, `stbi_load_16`, `stbi_loadf` | `loadFromPath` | | ported |
-| `stbi_load_gif_from_memory` | `loadGifFromMemory` | | not started |
+| `stbi_load_gif_from_memory` | `loadGifFromMemory` | `test/gif_test.zig` | oracle-tested |
 | `stbi_info_from_memory`, `stbi_info_from_callbacks`, `stbi_info_from_file`, `stbi_info` | `infoFromMemory`, `infoFromReader`, `infoFromFile`, `infoFromPath` | corpus files; fuzz cases | ported |
 | `stbi_is_16_bit_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_16_bit` | `is16BitFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | ported |
 | `stbi_is_hdr_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_hdr` | `isHdrFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | ported |
@@ -147,3 +147,38 @@ the tests of each case where the original is unsafe or never returns.
   the performance pass.
 - Arithmetic-coded (SOF9 to SOF15), lossless (SOF3) and 12-bit JPEGs are
   refused as the original refuses them.
+
+### GIF, HDR and PIC
+
+Inputs on which the original is unsafe or undefined, which the port refuses
+with an error (`doc/parity.md` has each one and its test):
+
+- GIF: restoring to the previous frame once two frames are out
+  (`GifDisposeToPrevious`); an animation of no pixels with several frames
+  (`GifZeroAreaFrames`); a flipped animation of fewer than 4 components
+  (`GifFlipComponents`); rows past the 32-bit range (`TooLargeGif`).
+- HDR: flat pixels that end early (`HdrTruncated`); info on a negative
+  size.
+- PIC: a packet or scanline failure loaded to other than 4 components.
+
+### BMP, TGA, PSD and PNM
+
+Inputs the original is unsafe or undefined on, which the port refuses
+(`doc/parity.md` has each, with its test):
+
+- BMP: a pixel naming a palette entry past the palette, read by the
+  original from uninitialized stack memory (`error.BmpPaletteIndex`). Every
+  OS/2 BMP using one of its last four palette entries is such a file, as the
+  original reads four entries fewer than an OS/2 palette holds: bmpsuite's
+  `Core_1_Bit.bmp`, `Core_4_Bit.bmp`, `Core_8_Bit.bmp` and `pal8os2sp.bmp`,
+  and `pal8badindex.bmp`.
+- BMP: a stored height of -2^31, whose `abs()` is undefined
+  (`error.DimensionTooLarge`, as the original reports in practice).
+- TGA: a raw true-colour or grey image cut short, whose missing rows the
+  original leaves uninitialized (`error.TgaTruncated`).
+- PSD: a colour below its white matte, whose conversion to an integer is
+  undefined (`error.PsdMatteOutOfRange`).
+
+Not refusals: the PSD 16-bit query follows the original's GCC and Clang
+builds, where `STBI_NOTUSED` skips the reads it wraps; BMP and PSD `info`
+sizes are the original's `int` bits in a `u32`.
