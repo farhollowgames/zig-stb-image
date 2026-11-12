@@ -196,8 +196,7 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
 
     // The file stores BGR; 15 and 16-bit pixels were read as RGB already.
     if (comp >= 3 and !rgb16) {
-        var i: usize = 0;
-        while (i < data.len) : (i += comp) std.mem.swap(u8, &data[i], &data[i + 2]);
+        if (comp == 3) swapRedBlue(3, data) else swapRedBlue(4, data);
     }
 
     const pixels = if (request.req_comp != 0 and request.req_comp != comp)
@@ -210,6 +209,27 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
         .height = height,
         .channels_in_file = comp,
     };
+}
+
+/// Swaps the first and third byte of every `comp`-byte pixel, 16 pixels
+/// at a time.
+fn swapRedBlue(comptime comp: usize, data: []u8) void {
+    const lanes = 16;
+    const mask: @Vector(lanes * comp, i32) = comptime blk: {
+        var lanes_mask: [lanes * comp]i32 = undefined;
+        for (&lanes_mask, 0..) |*m, j| {
+            const channel = j % comp;
+            const swapped = if (channel == 0) 2 else if (channel == 2) 0 else channel;
+            m.* = @intCast(j - channel + swapped);
+        }
+        break :blk lanes_mask;
+    };
+    var i: usize = 0;
+    while (i + lanes * comp <= data.len) : (i += lanes * comp) {
+        const block: @Vector(lanes * comp, u8) = data[i..][0 .. lanes * comp].*;
+        data[i..][0 .. lanes * comp].* = @shuffle(u8, block, undefined, mask);
+    }
+    while (i < data.len) : (i += comp) std.mem.swap(u8, &data[i], &data[i + 2]);
 }
 
 const Header = struct {
