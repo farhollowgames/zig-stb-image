@@ -589,17 +589,41 @@ const Png = struct {
         const indices = png.out.?;
         const result = try png.gpa.alloc(u8, pixel_count * pal_img_n);
         errdefer png.gpa.free(result);
-        for (indices.bytes[0..pixel_count], 0..) |index, i| {
-            // The original reads its uninitialized stack for an entry no
-            // PLTE chunk set; the port refuses the image.
-            if (index >= palette_set) return s.fail(error.PngPaletteIndex);
-            const entry = palette[@as(usize, index) * 4 ..][0..4];
-            @memcpy(result[i * pal_img_n ..][0..pal_img_n], entry[0..pal_img_n]);
+        const index_bytes = indices.bytes[0..pixel_count];
+        // The original reads its uninitialized stack for an entry no PLTE
+        // chunk set; the port refuses the image.
+        if (maxByte(index_bytes) >= palette_set) return s.fail(error.PngPaletteIndex);
+        if (pal_img_n == 4) {
+            for (index_bytes, 0..) |index, i| {
+                result[i * 4 ..][0..4].* = palette[@as(usize, index) * 4 ..][0..4].*;
+            }
+        } else {
+            // Each entry is written as four bytes, the fourth overwritten by
+            // the next pixel; the last pixel, with no next one, gets three.
+            const last = pixel_count - 1;
+            for (index_bytes[0..last], 0..) |index, i| {
+                result[i * 3 ..][0..4].* = palette[@as(usize, index) * 4 ..][0..4].*;
+            }
+            const index: usize = index_bytes[last];
+            result[last * 3 ..][0..3].* = palette[index * 4 ..][0..3].*;
         }
         indices.free(png.gpa);
         png.out = .{ .bytes = result, .wide = false };
     }
 };
+
+/// The largest byte of `bytes`, 0 for none.
+fn maxByte(bytes: []const u8) u8 {
+    const lanes = 32;
+    var top: @Vector(lanes, u8) = @splat(0);
+    var k: usize = 0;
+    while (bytes.len - k >= lanes) : (k += lanes) {
+        top = @max(top, @as(@Vector(lanes, u8), bytes[k..][0..lanes].*));
+    }
+    var result = @reduce(.Max, top);
+    for (bytes[k..]) |byte| result = @max(result, byte);
+    return result;
+}
 
 /// Undoes `filter` on one row: `in` into `cur`, with `prior` the row
 /// above and `filter_bytes` the distance to the byte on the left.
