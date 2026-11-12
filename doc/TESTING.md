@@ -187,9 +187,9 @@ for ever on a zlib initial size of 0), and a segmentation fault is
 reported by Zig's handler, which the test runner installs over the
 sanitizer's, as "died, signal 6: Segmentation fault at address …".
 
-On 12 November 2026 the run made 418,326 calls (and the JPEG file's 48,941
-again with the scalar IDCT) in about 20 minutes. 2,465 were flagged; the
-port refuses all but 85 of them, and those 85 are the two cases
+On 12 November 2026 the final run, over every test file, made 419,867
+calls. 3,119 were flagged; the port refuses 3,034 of them, and the other 85
+are the two cases
 `parity.md` names: an empty IDAT chunk before the data (24 calls, a
 `memcpy` of 0 bytes from a null pointer), and the scalar build's IDCT
 overflows on the SSE2 port (61 calls; the scalar port refuses every one).
