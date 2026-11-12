@@ -45,7 +45,12 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
             try common.convertFormat16(gpa, out, comp, req_comp, x, y)
         else
             out;
-        return .{ .pixels = .{ .u16 = pixels }, .width = x, .height = y, .channels_in_file = img_n };
+        return .{
+            .pixels = .{ .u16 = pixels },
+            .width = x,
+            .height = y,
+            .channels_in_file = img_n,
+        };
     }
     const out = try gpa.alloc(u8, @as(usize, img_n) * x * y);
     if (!source.getn(out)) {
@@ -56,7 +61,12 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
         try common.convertFormat(gpa, limits, out, comp, req_comp, x, y)
     else
         out;
-    return .{ .pixels = .{ .u8 = pixels }, .width = x, .height = y, .channels_in_file = img_n };
+    return .{
+        .pixels = .{ .u8 = pixels },
+        .width = x,
+        .height = y,
+        .channels_in_file = img_n,
+    };
 }
 
 fn isSpace(c: u8) bool {

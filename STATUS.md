@@ -49,14 +49,14 @@ picks it up; the git log has the detail.
 | PNG Adam7 interlace | as above | as above | | not started |
 | PNG iPhone CgBI, BGR conversion and unpremultiply | `stbi__de_iphone` | as above | | not started |
 | zlib (inflate) | `stbi__zbuf`, `stbi__parse_zlib` | `src/zlib.zig` | | not started |
-| TGA | `stbi__tga_*` | `src/tga.zig` | | not started |
-| BMP | `stbi__bmp_*` | `src/bmp.zig` | | not started |
-| PSD (composited image, 8 and 16 bits, RLE and raw) | `stbi__psd_*` | `src/psd.zig` | | not started |
+| TGA | `stbi__tga_*` | `src/tga.zig` | `test/tga_test.zig`: the TGA test suite, every image type, depth and origin, packets of every length, colour maps, headers, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
+| BMP | `stbi__bmp_*` | `src/bmp.zig` | `test/bmp_test.zig`: bmpsuite and libjpeg-turbo files, every header size and depth, bit-field masks of every width, zero alpha, palette sizes, bad headers, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
+| PSD (composited image, 8 and 16 bits, RLE and raw) | `stbi__psd_*` | `src/psd.zig` | `test/psd_test.zig`: the psd-tools PSD and PSB files, channel counts 0 to 56 at both depths and compressions, PackBits of every length byte, header fields, largest sizes, the 16-bit request and query, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
 | GIF, first frame | `stbi__gif_load` | `src/gif.zig` | | not started |
 | GIF, every frame | `stbi_load_gif_from_memory` | `loadGifFromMemory` | | not started |
 | HDR (Radiance RGBE, RLE and flat) | `stbi__hdr_*` | `src/hdr.zig` | | not started |
 | PIC (Softimage) | `stbi__pic_*` | `src/pic.zig` | | not started |
-| PNM (binary PGM and PPM, 8 and 16 bits) | `stbi__pnm_*` | `src/pnm.zig` | | not started |
+| PNM (binary PGM and PPM, 8 and 16 bits) | `stbi__pnm_*` | `src/pnm.zig` | `test/pnm_test.zig`: stb, libjpeg-turbo and image-rs files, every maximum value, whitespace and comments, numbers at the edge of an int, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
 
 ## Functions
 
@@ -101,3 +101,25 @@ picks it up; the git log has the detail.
 ## Left out (awaiting the author's approval)
 
 To be completed with the decoders.
+
+### BMP, TGA, PSD and PNM
+
+Inputs the original is unsafe or undefined on, which the port refuses
+(`doc/parity.md` has each, with its test):
+
+- BMP: a pixel naming a palette entry past the palette, read by the
+  original from uninitialized stack memory (`error.BmpPaletteIndex`). Every
+  OS/2 BMP using one of its last four palette entries is such a file, as the
+  original reads four entries fewer than an OS/2 palette holds: bmpsuite's
+  `Core_1_Bit.bmp`, `Core_4_Bit.bmp`, `Core_8_Bit.bmp` and `pal8os2sp.bmp`,
+  and `pal8badindex.bmp`.
+- BMP: a stored height of -2^31, whose `abs()` is undefined
+  (`error.DimensionTooLarge`, as the original reports in practice).
+- TGA: a raw true-colour or grey image cut short, whose missing rows the
+  original leaves uninitialized (`error.TgaTruncated`).
+- PSD: a colour below its white matte, whose conversion to an integer is
+  undefined (`error.PsdMatteOutOfRange`).
+
+Not refusals: the PSD 16-bit query follows the original's GCC and Clang
+builds, where `STBI_NOTUSED` skips the reads it wraps; BMP and PSD `info`
+sizes are the original's `int` bits in a `u32`.

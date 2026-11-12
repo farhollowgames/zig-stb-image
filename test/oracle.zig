@@ -453,7 +453,8 @@ pub fn expectAll(gpa: std.mem.Allocator, bytes: []const u8, label: Label, expect
             .options = .{ .flip_vertically = true },
         }, label, expect);
         try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .callbacks }, label, expect);
-        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .file, .file_offset = 3 }, label, expect);
+        const from_file: Request = .{ .bits = bits, .via = .file, .file_offset = 3 };
+        try expectLoadSame(gpa, bytes, from_file, label, expect);
     }
     for ([_]Query{ .info, .is_16_bit, .is_hdr }) |query| {
         for ([_]Via{ .memory, .callbacks, .file }) |via| try expectQuerySame(bytes, query, via, label);

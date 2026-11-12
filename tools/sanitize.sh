@@ -8,7 +8,7 @@ test_binary="$1"
 out="$2"
 mkdir -p "$out"
 runtime=$(clang -print-file-name=libclang_rt.asan-x86_64.so)
-ASAN_OPTIONS=halt_on_error=0:detect_leaks=0:abort_on_error=0:print_summary=1 \
+ASAN_OPTIONS=halt_on_error=0:detect_leaks=0:abort_on_error=0:print_summary=1:allocator_may_return_null=1 \
 UBSAN_OPTIONS=halt_on_error=0:print_stacktrace=1 \
 LD_PRELOAD="$runtime" "$test_binary" >"$out/log.txt" 2>&1
 status=$?

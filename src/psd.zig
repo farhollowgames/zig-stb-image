@@ -78,21 +78,20 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
     const height: u32 = @intCast(h);
     const pixel_count = @as(usize, width) * height;
 
+    const layout: Layout = .{
+        .channel_count = channel_count,
+        .height = height,
+        .pixel_count = pixel_count,
+        .bitdepth = bitdepth,
+    };
     if (compression == 0 and bitdepth == 16 and request.bits_per_channel == 16) {
         // Allocated after the original's check of 8 bytes a pixel.
         if (!common.sizesValid(limits, &.{ 8, w, h }, 0)) return source.fail(error.OutOfMemory);
         const out = try gpa.alloc(u16, 4 * pixel_count);
-        errdefer gpa.free(out);
-        for (0..4) |channel| {
-            const samples = out[channel..];
-            if (channel >= channel_count) {
-                const value: u16 = if (channel == 3) 65535 else 0;
-                for (0..pixel_count) |i| samples[i * 4] = value;
-            } else {
-                for (0..pixel_count) |i| samples[i * 4] = source.get16be();
-            }
-        }
-        if (channel_count >= 4) try removeWhiteMatte(u16, source, out);
+        decodeRaw16(source, layout, out) catch |err| {
+            gpa.free(out);
+            return err;
+        };
         const pixels = if (request.req_comp != 0 and request.req_comp != 4)
             try common.convertFormat16(gpa, out, 4, request.req_comp, width, height)
         else
@@ -106,33 +105,14 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
     }
 
     const out = try gpa.alloc(u8, 4 * pixel_count);
-    errdefer gpa.free(out);
-    if (compression != 0) {
-        // Each row's compressed length, which the decoder does not need.
-        source.skip(@as(i64, h) * channel_count * 2);
-        for (0..4) |channel| {
-            const samples = out[channel..];
-            if (channel >= channel_count) {
-                const value: u8 = if (channel == 3) 255 else 0;
-                for (0..pixel_count) |i| samples[i * 4] = value;
-            } else if (!decodeRle(source, samples, pixel_count)) {
-                return source.fail(error.PsdBadRle);
-            }
-        }
-    } else {
-        for (0..4) |channel| {
-            const samples = out[channel..];
-            if (channel >= channel_count) {
-                const value: u8 = if (channel == 3) 255 else 0;
-                for (0..pixel_count) |i| samples[i * 4] = value;
-            } else if (bitdepth == 16) {
-                for (0..pixel_count) |i| samples[i * 4] = @intCast(source.get16be() >> 8);
-            } else {
-                for (0..pixel_count) |i| samples[i * 4] = source.get8();
-            }
-        }
-    }
-    if (channel_count >= 4) try removeWhiteMatte(u8, source, out);
+    const decoded = if (compression != 0)
+        decodeRle8(source, layout, out)
+    else
+        decodeRaw8(source, layout, out);
+    decoded catch |err| {
+        gpa.free(out);
+        return err;
+    };
     const pixels = if (request.req_comp != 0 and request.req_comp != 4)
         try common.convertFormat(gpa, limits, out, 4, request.req_comp, width, height)
     else
@@ -143,6 +123,67 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
         .height = height,
         .channels_in_file = 4,
     };
+}
+
+const Layout = struct {
+    channel_count: u16,
+    height: u32,
+    pixel_count: usize,
+    bitdepth: u16,
+};
+
+/// The samples of one channel, every fourth from its first; none in an
+/// image of no pixels.
+fn channelSamples(comptime T: type, out: []T, channel: usize) []T {
+    return out[@min(channel, out.len)..];
+}
+
+/// Raw 16-bit samples into 16-bit pixels.
+fn decodeRaw16(source: *Source, layout: Layout, out: []u16) Error!void {
+    for (0..4) |channel| {
+        const samples = channelSamples(u16, out, channel);
+        if (channel >= layout.channel_count) {
+            const value: u16 = if (channel == 3) 65535 else 0;
+            for (0..layout.pixel_count) |i| samples[i * 4] = value;
+        } else {
+            for (0..layout.pixel_count) |i| samples[i * 4] = source.get16be();
+        }
+    }
+    if (layout.channel_count >= 4) try removeWhiteMatte(u16, source, out);
+}
+
+/// Raw 8 or 16-bit samples into 8-bit pixels, the top byte of a 16-bit
+/// sample.
+fn decodeRaw8(source: *Source, layout: Layout, out: []u8) Error!void {
+    for (0..4) |channel| {
+        const samples = channelSamples(u8, out, channel);
+        if (channel >= layout.channel_count) {
+            const value: u8 = if (channel == 3) 255 else 0;
+            for (0..layout.pixel_count) |i| samples[i * 4] = value;
+        } else if (layout.bitdepth == 16) {
+            for (0..layout.pixel_count) |i| samples[i * 4] = @intCast(source.get16be() >> 8);
+        } else {
+            for (0..layout.pixel_count) |i| samples[i * 4] = source.get8();
+        }
+    }
+    if (layout.channel_count >= 4) try removeWhiteMatte(u8, source, out);
+}
+
+/// PackBits data into 8-bit pixels. The original decodes bytes at either
+/// depth.
+fn decodeRle8(source: *Source, layout: Layout, out: []u8) Error!void {
+    // Each row's compressed length, which the decoder does not need.
+    source.skip(@as(i64, layout.height) * layout.channel_count * 2);
+    for (0..4) |channel| {
+        const samples = channelSamples(u8, out, channel);
+        if (channel >= layout.channel_count) {
+            const value: u8 = if (channel == 3) 255 else 0;
+            for (0..layout.pixel_count) |i| samples[i * 4] = value;
+        } else if (!decodeRle(source, samples, layout.pixel_count)) {
+            return source.fail(error.PsdBadRle);
+        }
+    }
+    if (layout.channel_count >= 4) try removeWhiteMatte(u8, source, out);
 }
 
 /// Photoshop blends the colour of a partly transparent pixel of the
@@ -160,7 +201,9 @@ fn removeWhiteMatte(comptime T: type, source: *Source, out: []T) Error!void {
             const inv_a = max * (1 - ra);
             for (pixel[0..3]) |*sample| {
                 const value = @as(f32, @floatFromInt(sample.*)) * ra + inv_a;
-                if (!(value > -1.0 and value < max + 1.0)) return source.fail(error.PsdMatteOutOfRange);
+                if (!(value > -1.0 and value < max + 1.0)) {
+                    return source.fail(error.PsdMatteOutOfRange);
+                }
                 sample.* = @intFromFloat(value);
             }
         }
@@ -199,8 +242,9 @@ pub fn info(source: *Source) ?common.Info {
     return .{ .width = width, .height = height, .channels_in_file = 4 };
 }
 
-/// Whether the image has 16-bit samples. Leaves the source after the depth
-/// when it does, and rewinds otherwise.
+/// Whether the image has 16-bit samples, as the original's GCC and Clang
+/// builds tell it. Leaves the source after the depth when it does, and
+/// rewinds otherwise.
 pub fn is16(source: *Source) bool {
     if (source.get32be() != signature) {
         source.rewind();
@@ -216,8 +260,9 @@ pub fn is16(source: *Source) bool {
         source.rewind();
         return false;
     }
-    _ = source.get32be(); // height
-    _ = source.get32be(); // width
+    // The original means to skip the height and width here, but outside
+    // MSVC its `STBI_NOTUSED` does not evaluate the reads, so the depth it
+    // checks is the top half of the height. The port does as those builds.
     if (source.get16be() != 16) {
         source.rewind();
         return false;

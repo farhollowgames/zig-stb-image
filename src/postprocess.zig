@@ -20,6 +20,9 @@ pub fn convert16To8(gpa: std.mem.Allocator, wide: []u16) Error![]u8 {
 /// Frees `narrow`.
 pub fn convert8To16(gpa: std.mem.Allocator, narrow: []u8) Error![]u16 {
     defer gpa.free(narrow);
+    // The original counts the new size in bytes in an `int`; past it, the
+    // count overflows, which is undefined, and its allocation fails.
+    if (narrow.len > std.math.maxInt(i32) / 2) return error.OutOfMemory;
     const wide = try gpa.alloc(u16, narrow.len);
     for (wide, narrow) |*w, n| w.* = @as(u16, n) * 0x101;
     return wide;

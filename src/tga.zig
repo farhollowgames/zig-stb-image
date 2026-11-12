@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const common = @import("common.zig");
+const postprocess = @import("postprocess.zig");
 
 const Source = common.Source;
 const Error = common.Error;
@@ -175,47 +176,23 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
     const size = [_]i64{ width, height, comp };
     if (!common.sizesValid(limits, &size, 0)) return source.fail(error.TooLargeTga);
     const data = try common.allocChecked(u8, gpa, limits, &size, 0);
-    errdefer gpa.free(data);
-
+    const header: Header = .{
+        .indexed = indexed,
+        .is_rle = is_rle,
+        .rgb16 = rgb16,
+        .bottom_up = bottom_up,
+        .index_bits = bits_per_pixel,
+        .comp = comp,
+        .width = width,
+        .height = height,
+        .palette_start = palette_start,
+        .palette_len = palette_len,
+    };
     source.skip(id_length);
-    const row_len = @as(usize, width) * comp;
-    if (!indexed and !is_rle and !rgb16) {
-        for (0..height) |i| {
-            const row = if (bottom_up) height - i - 1 else i;
-            // The original leaves a row it cannot read whole as it found
-            // it, uninitialized; the port refuses the image.
-            if (!source.getn(data[row * row_len ..][0..row_len])) {
-                return source.fail(error.TgaTruncated);
-            }
-        }
-    } else {
-        var palette: []u8 = &.{};
-        defer gpa.free(palette);
-        if (indexed) {
-            if (palette_len == 0) return source.fail(error.BadTgaPalette);
-            source.skip(palette_start);
-            palette = try common.allocChecked(u8, gpa, limits, &.{ palette_len, comp }, 0);
-            if (rgb16) {
-                for (0..palette_len) |i| readRgb16(source, palette[i * 3 ..][0..3]);
-            } else if (!source.getn(palette)) {
-                return source.fail(error.BadTgaPalette);
-            }
-        }
-        decodePixels(source, .{
-            .indexed = indexed,
-            .is_rle = is_rle,
-            .rgb16 = rgb16,
-            .index_bits = bits_per_pixel,
-            .comp = comp,
-        }, palette, data);
-        if (bottom_up) {
-            for (0..height / 2) |j| {
-                const top = data[j * row_len ..][0..row_len];
-                const bottom = data[(height - 1 - j) * row_len ..][0..row_len];
-                for (top, bottom) |*a, *b| std.mem.swap(u8, a, b);
-            }
-        }
-    }
+    decodeImage(gpa, source, limits, header, data) catch |err| {
+        gpa.free(data);
+        return err;
+    };
 
     // The file stores BGR; 15 and 16-bit pixels were read as RGB already.
     if (comp >= 3 and !rgb16) {
@@ -235,19 +212,63 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
     };
 }
 
-const Layout = struct {
+const Header = struct {
     indexed: bool,
     is_rle: bool,
     rgb16: bool,
+    bottom_up: bool,
     /// The size of a colour map index, 8 or 16 bits.
     index_bits: u8,
     comp: u3,
+    width: u16,
+    height: u16,
+    palette_start: u16,
+    palette_len: u16,
 };
+
+/// Decodes the colour map and the pixels into `data`, top row first.
+fn decodeImage(
+    gpa: std.mem.Allocator,
+    source: *Source,
+    limits: common.Limits,
+    header: Header,
+    data: []u8,
+) Error!void {
+    const row_len = @as(usize, header.width) * header.comp;
+    if (!header.indexed and !header.is_rle and !header.rgb16) {
+        for (0..header.height) |i| {
+            const row = if (header.bottom_up) header.height - i - 1 else i;
+            // The original leaves a row it cannot read whole as it found
+            // it, uninitialized; the port refuses the image.
+            if (!source.getn(data[row * row_len ..][0..row_len])) {
+                return source.fail(error.TgaTruncated);
+            }
+        }
+        return;
+    }
+    var palette: []u8 = &.{};
+    defer gpa.free(palette);
+    if (header.indexed) {
+        if (header.palette_len == 0) return source.fail(error.BadTgaPalette);
+        source.skip(header.palette_start);
+        const palette_size = [_]i64{ header.palette_len, header.comp };
+        palette = try common.allocChecked(u8, gpa, limits, &palette_size, 0);
+        if (header.rgb16) {
+            for (0..header.palette_len) |i| readRgb16(source, palette[i * 3 ..][0..3]);
+        } else if (!source.getn(palette)) {
+            return source.fail(error.BadTgaPalette);
+        }
+    }
+    decodePixels(source, header, palette, data);
+    if (header.bottom_up) {
+        postprocess.verticalFlip(u8, data, header.width, header.height, header.comp);
+    }
+}
 
 /// Decodes every pixel of a colour-mapped, run-length encoded or 15 and
 /// 16-bit image into `data`, in file order.
-fn decodePixels(source: *Source, layout: Layout, palette: []const u8, data: []u8) void {
-    const comp = layout.comp;
+fn decodePixels(source: *Source, header: Header, palette: []const u8, data: []u8) void {
+    const comp = header.comp;
     const entries = palette.len / comp;
     var raw: [4]u8 = @splat(0);
     var rle_count: u32 = 0;
@@ -255,7 +276,7 @@ fn decodePixels(source: *Source, layout: Layout, palette: []const u8, data: []u8
     var read_next_pixel = true;
     var i: usize = 0;
     while (i < data.len) : (i += comp) {
-        if (layout.is_rle) {
+        if (header.is_rle) {
             if (rle_count == 0) {
                 const command = source.get8();
                 rle_count = 1 + @as(u32, command & 127);
@@ -268,12 +289,12 @@ fn decodePixels(source: *Source, layout: Layout, palette: []const u8, data: []u8
             read_next_pixel = true;
         }
         if (read_next_pixel) {
-            if (layout.indexed) {
-                var index: usize = if (layout.index_bits == 8) source.get8() else source.get16le();
+            if (header.indexed) {
+                var index: usize = if (header.index_bits == 8) source.get8() else source.get16le();
                 // An index past the colour map reads the first entry.
                 if (index >= entries) index = 0;
                 @memcpy(raw[0..comp], palette[index * comp ..][0..comp]);
-            } else if (layout.rgb16) {
+            } else if (header.rgb16) {
                 readRgb16(source, raw[0..3]);
             } else {
                 for (raw[0..comp]) |*byte| byte.* = source.get8();
@@ -281,6 +302,6 @@ fn decodePixels(source: *Source, layout: Layout, palette: []const u8, data: []u8
             read_next_pixel = false;
         }
         @memcpy(data[i..][0..comp], raw[0..comp]);
-        if (layout.is_rle) rle_count -= 1;
+        if (header.is_rle) rle_count -= 1;
     }
 }
