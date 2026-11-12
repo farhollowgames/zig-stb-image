@@ -84,14 +84,21 @@ performance pass, the skeptic's review, the fixes) are not started.
   whose message gives its benchmark gain; the oracle tests are not edited
   for speed.
 - **Performance: JPEG** (`perf/jpeg`). Time port / original SSE2, best
-  of 3, `zig build bench -- --filter jpeg --rounds 3`: 4:4:4 1.08, 4:2:0
-  1.17, 4:2:0 to rgba 2.13, grey 1.19, progressive 1.14, ycck 1.10. Done:
-  the SSE2-mode IDCT on `@Vector` lanes; `-Djpeg-idct` defaults to `sse2`
-  on x86-64. Left: `@Vector` YCbCr to RGB/RGBA and 2x2 upsampling, the
-  grey copy, the YCCK and CMYK blends, Huffman and per-block overhead, the
-  scalar IDCT. Resume: measure a change with the filtered bench in the same
-  session before and after; run `test -Dtest-filter=jpeg` in both
-  `-Djpeg-idct` modes.
+  of 3, `zig build bench -- --filter jpeg --rounds 3`, after the YCbCr
+  commit: 4:4:4 0.76, 4:2:0 0.69, 4:2:0 to rgba 1.25, grey 0.69,
+  progressive 0.92, ycck 0.93. Done and measured: the SSE2-mode IDCT on
+  `@Vector` lanes; `-Djpeg-idct` defaults to `sse2` on x86-64; `@Vector`
+  YCbCr to RGB/RGBA. Work in progress (committed, unit test passes, JPEG
+  oracle tests and benchmark not yet run): `@Vector` 2x2 (hv_2)
+  upsampling; keep it only if the bench gains. Next: the grey copy as a
+  `@memcpy`, the YCCK and CMYK blends on vectors, Huffman and per-block
+  overhead (rgba is the one row still above 1: the port's RGBA costs what
+  its RGB does, so the decode itself must get faster), the scalar IDCT on
+  vectors where no step can overflow. Resume: measure a change with the
+  filtered bench in the same session before and after; run
+  `test -Dtest-filter=jpeg` in both `-Djpeg-idct` modes; at the end update
+  `doc/BENCHMARKS.md`'s JPEG bias and README's `-Djpeg-idct` line (the
+  lead's).
 - **Left to do:**
   1. Step 5, the performance pass, by an agent that did not write the port,
      on branch `review/perf-and-skeptic`. Zig 0.17 never vectorizes loops,

@@ -1206,15 +1206,33 @@ fn resampleRowHv2(out: []u8, in_near: []const u8, in_far: []const u8) void {
         out[1] = value;
         return;
     }
-    var t1 = 3 * @as(u32, in_near[0]) + in_far[0];
-    out[0] = div4(t1 + 2);
-    for (1..w) |i| {
+    out[0] = div4(3 * @as(u32, in_near[0]) + in_far[0] + 2);
+    // Output samples 2i - 1 and 2i blend the vertical sums at i - 1 and i;
+    // `lanes` input samples at a time, all within 16 bits.
+    var i: usize = 1;
+    while (i + lanes <= w) : (i += lanes) {
+        const before = verticalSums(in_near[i - 1 ..][0..lanes].*, in_far[i - 1 ..][0..lanes].*);
+        const here = verticalSums(in_near[i..][0..lanes].*, in_far[i..][0..lanes].*);
+        const three: U16xN = @splat(3);
+        const eight: U16xN = @splat(8);
+        const left: U8xN = @intCast((three * before + here + eight) >> @splat(4));
+        const right: U8xN = @intCast((three * here + before + eight) >> @splat(4));
+        out[2 * i - 1 ..][0 .. 2 * lanes].* = @shuffle(u8, left, right, zip(lanes, 1, 1, 0));
+    }
+    var t1 = 3 * @as(u32, in_near[i - 1]) + in_far[i - 1];
+    while (i < w) : (i += 1) {
         const t0 = t1;
         t1 = 3 * @as(u32, in_near[i]) + in_far[i];
         out[i * 2 - 1] = div16(3 * t0 + t1 + 8);
         out[i * 2] = div16(3 * t1 + t0 + 8);
     }
     out[w * 2 - 1] = div4(t1 + 2);
+}
+
+/// Three parts the nearer row and one part the farther.
+fn verticalSums(near: U8xN, far: U8xN) U16xN {
+    const three: U16xN = @splat(3);
+    return three * @as(U16xN, near) + @as(U16xN, far);
 }
 
 /// `stbi__resample_row_generic`: each input sample repeated `hs` times;
@@ -1864,5 +1882,48 @@ test "the vector YCbCr conversion gives the bytes of the scalar one for every co
                 try std.testing.expectEqual(0xaa, actual[size]);
             }
         }
+    }
+}
+
+/// `stbi__resample_row_hv_2` one sample at a time: the reference for
+/// `resampleRowHv2`'s vector code.
+fn resampleRowHv2Samples(out: []u8, in_near: []const u8, in_far: []const u8) void {
+    const w = in_near.len;
+    if (w == 1) {
+        const value = div4(3 * @as(u32, in_near[0]) + in_far[0] + 2);
+        out[0] = value;
+        out[1] = value;
+        return;
+    }
+    var t1 = 3 * @as(u32, in_near[0]) + in_far[0];
+    out[0] = div4(t1 + 2);
+    for (1..w) |i| {
+        const t0 = t1;
+        t1 = 3 * @as(u32, in_near[i]) + in_far[i];
+        out[i * 2 - 1] = div16(3 * t0 + t1 + 8);
+        out[i * 2] = div16(3 * t1 + t0 + 8);
+    }
+    out[w * 2 - 1] = div4(t1 + 2);
+}
+
+test "the vector 2 by 2 upsampling gives the bytes of the scalar one" {
+    var prng: std.Random.DefaultPrng = .init(0x2a2);
+    const random = prng.random();
+    var near: [100]u8 = undefined;
+    var far: [100]u8 = undefined;
+    var expected: [2 * near.len + 1]u8 = undefined;
+    var actual: [2 * near.len + 1]u8 = undefined;
+    for (0..20_000) |case| {
+        const w = 1 + case % near.len;
+        for (near[0..w], far[0..w]) |*n, *f| {
+            // Extremes often, to reach the largest sums.
+            n.* = if (random.boolean()) random.int(u8) else if (random.boolean()) 255 else 0;
+            f.* = if (random.boolean()) random.int(u8) else if (random.boolean()) 255 else 0;
+        }
+        expected[2 * w] = 0xaa;
+        actual[2 * w] = 0xaa;
+        resampleRowHv2Samples(&expected, near[0..w], far[0..w]);
+        resampleRowHv2(&actual, near[0..w], far[0..w]);
+        try std.testing.expectEqualSlices(u8, expected[0 .. 2 * w + 1], actual[0 .. 2 * w + 1]);
     }
 }
