@@ -133,12 +133,15 @@ before and after are from the same session.
   new bench rows that go through a conversion: tga raw to rgba 1.57 to
   0.63, tga raw to grey 1.68 to 0.51, psd raw to rgb 0.76 to 0.65. PSD
   PackBits literal runs copied from the buffer: psd rle 1.50 to 0.84.
-- **Now:** bmp 24-bit 0.06, bmp 32-bit 0.05, bmp 24-bit to rgba 0.14, psd
-  raw 0.65, psd rle 0.84, psd raw to rgb 0.65, tga raw 0.28, tga rle 0.82,
-  tga raw to rgba 0.63, tga raw to grey 0.51, pnm 8-bit 1.03, pnm 16-bit
-  1.01 (PNM from the noisy first run). The full test run passed after the
-  conversion change.
-- **Next:** the full bench table, and the full test run once more.
+- **Now** (full table, `--rounds 3`): bmp 24-bit 0.05, bmp 32-bit 0.06,
+  bmp 24-bit to rgba 0.14, tga raw 0.28, tga rle 0.80, tga raw to rgba
+  0.63, tga raw to grey 0.51, psd raw 0.65, psd rle 0.90, psd raw to rgb
+  0.66, pnm 8-bit 0.99, pnm 16-bit 0.98. Every row of this area is faster
+  than the original's SSE2 build; the other areas' rows did not move.
+- **Done for this area;** left for whoever wants more: the BMP masked
+  (16-bit, odd masks) and palette paths, the PSD 16-bit raw path and the
+  TGA colour-mapped and RLE pixel loops are still byte by byte (no bench
+  row covers them).
 - **Found:** a two-operand `@shuffle` that interleaves two vectors
   compiled to code twice as slow as the scalar loop; fixed-size `inline
   for` loops over arrays vectorize well for that. One-operand shuffles,
