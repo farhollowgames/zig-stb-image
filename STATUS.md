@@ -113,6 +113,22 @@ performance pass, the skeptic's review, the fixes) are not started.
   `port/bmp-tga-psd-pnm` and `port/gif-hdr-pic` (local only, worktrees under
   `~/Projects/zig-stb-image.wt/`), all merged into `main`.
 
+### Performance: PNG and zlib
+
+On branch `perf/png` (worktree `~/Projects/zig-stb-image.wt/perf-png`).
+Rows' ratios now (port time / original SSE2 time, best of 3 rounds): zlib
+inflate 0.82; png rgb 0.85, rgba 0.84, grey 0.92, rgb 16-bit 0.91, adam7
+0.85, palette 1.11, rgb to rgba 0.88, rgb to float 0.93.
+
+- **Kept:** inflate's Huffman loop keeps its bit buffer in locals and fills
+  it with one 32-bit load.
+- **Dropped:** copying matches eight bytes at a time (no measurable gain).
+- **Left:** row unfiltering with `@Vector` pixels; palette expansion; the
+  16-bit byte swap; the RGB-to-RGBA alpha expansion.
+- **Resume:** `zig build bench -- --filter png --rounds 3` (and `--filter
+  zlib`) through the build wrapper; tests with `-Dtest-filter=zlib
+  -Dtest-filter=png -Dtest-filter=PNG -Dtest-filter=DEFLATE`.
+
 ## Formats
 
 | format | upstream | zig-stb-image | tests | state |
