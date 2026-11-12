@@ -60,6 +60,10 @@ pub const upstream = struct {
         reason: *?[*:0]const u8,
     ) ?[*]u8;
     pub extern fn simd_pow(x: f64, y: f64) f64;
+    pub extern fn simd_set_flag(which: c_int, thread: c_int, value: c_int) void;
+    pub extern fn scalar_set_flag(which: c_int, thread: c_int, value: c_int) void;
+    pub extern fn simd_get_flags(flip: *c_int, unpremultiply: *c_int, iphone: *c_int) void;
+    pub extern fn scalar_get_flags(flip: *c_int, unpremultiply: *c_int, iphone: *c_int) void;
 };
 
 fn loadFn(path: Path) *const fn ([*]const u8, usize, c_int, *const Settings, *Result) callconv(.c) void {
@@ -191,7 +195,9 @@ fn reasonMatches(err: anyerror, reason: ?[*:0]const u8, path: Path) bool {
         .scalar => stbi.failureMessage(port_err),
     };
     if (port_err == error.UnknownPngChunk and path == .simd) {
-        // The original names the chunk: "abcd PNG chunk not known".
+        // The original names the chunk: "abcd PNG chunk not known", which
+        // a zero byte in the name cuts short.
+        if (theirs.len < 4) return true;
         return theirs.len == 4 + 1 + ours.len and std.mem.eql(u8, theirs[5..], ours);
     }
     return std.mem.eql(u8, theirs, ours);

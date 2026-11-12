@@ -199,3 +199,32 @@ double F(pow)(double x, double y)
 {
    return pow(x, y);
 }
+
+/* The original's flags, for the tests of its setters. which: 0 flip,
+   1 unpremultiply, 2 iPhone conversion; thread: the calling thread's
+   setter rather than the process-wide one. */
+void F(set_flag)(int which, int thread, int value)
+{
+   switch (which) {
+      case 0:
+         if (thread) stbi_set_flip_vertically_on_load_thread(value);
+         else stbi_set_flip_vertically_on_load(value);
+         break;
+      case 1:
+         if (thread) stbi_set_unpremultiply_on_load_thread(value);
+         else stbi_set_unpremultiply_on_load(value);
+         break;
+      case 2:
+         if (thread) stbi_convert_iphone_png_to_rgb_thread(value);
+         else stbi_convert_iphone_png_to_rgb(value);
+         break;
+   }
+}
+
+/* The flags a load on the calling thread would use. */
+void F(get_flags)(int *flip, int *unpremultiply, int *iphone)
+{
+   *flip = stbi__vertically_flip_on_load;
+   *unpremultiply = stbi__unpremultiply_on_load;
+   *iphone = stbi__de_iphone_flag;
+}

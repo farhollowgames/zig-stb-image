@@ -134,13 +134,24 @@ pub fn loadFromFile(
     comptime checkSample(T);
     var source: Source = undefined;
     source.initReader(&file_reader.interface);
-    var image = try loadSource(T, gpa, &source, &options);
+    var image = loadSource(T, gpa, &source, &options) catch |err| {
+        try seekPastEnd(file_reader, &source);
+        return err;
+    };
+    errdefer image.deinit(gpa);
+    try seekPastEnd(file_reader, &source);
     if (T != f32) {
-        errdefer image.deinit(gpa);
         // Give back what the source buffered but did not use.
         try file_reader.seekBy(-@as(i64, @intCast(source.end - source.pos)));
     }
     return image;
+}
+
+/// Where the decoder skipped past the end of the file, the original's
+/// `fseek` leaves the file there; so does the port.
+fn seekPastEnd(file_reader: *std.Io.File.Reader, source: *const Source) FileError!void {
+    if (source.skipped_past_end == 0) return;
+    try file_reader.seekBy(std.math.cast(i64, source.skipped_past_end) orelse std.math.maxInt(i64));
 }
 
 pub const PathError = FileError || std.Io.File.OpenError;
