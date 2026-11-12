@@ -444,7 +444,7 @@ const Decoder = struct {
             if (!addIntsValid(dc_pred, diff)) return z.source.fail(error.BadJpegDelta);
             const dc = dc_pred + diff;
             z.components[b].dc_pred = dc;
-            const scale = @as(i32, 1) << @intCast(z.succ_low);
+            const scale = @as(u16, 1) << @intCast(z.succ_low);
             if (!mul2ShortsValid(dc, scale)) return z.source.fail(error.CannotMergeDcAndAc);
             data[0] = @intCast(dc * scale);
         } else {
@@ -1424,15 +1424,12 @@ fn addIntsValid(a: i32, b: i32) bool {
     return a <= std.math.maxInt(i32) - b;
 }
 
-/// `stbi__mul2shorts_valid`: whether `a * b` fits a `short`, with C's
-/// division.
-fn mul2ShortsValid(a: i32, b: i32) bool {
-    const short_max = std.math.maxInt(i16);
-    const short_min = std.math.minInt(i16);
-    if (b == 0 or b == -1) return true;
-    if ((a >= 0) == (b >= 0)) return a <= @divTrunc(short_max, b);
-    if (b < 0) return a <= @divTrunc(short_min, b);
-    return a >= @divTrunc(short_min, b);
+/// `stbi__mul2shorts_valid`: whether `a * b` fits a `short`. The original
+/// tests it by dividing; for a `b` that is not negative, as every quantizer
+/// and power of two it is given is, the product test is the same.
+fn mul2ShortsValid(a: i32, b: u16) bool {
+    const product = @as(i64, a) * b;
+    return product >= std.math.minInt(i16) and product <= std.math.maxInt(i16);
 }
 
 /// `(1 << n) - 1`.
@@ -2002,5 +1999,37 @@ test "the vector 2 by 2 upsampling gives the bytes of the scalar one" {
         resampleRowHv2Samples(&expected, near[0..w], far[0..w]);
         resampleRowHv2(&actual, near[0..w], far[0..w]);
         try std.testing.expectEqualSlices(u8, expected[0 .. 2 * w + 1], actual[0 .. 2 * w + 1]);
+    }
+}
+
+test "the product test of `mul2ShortsValid` agrees with the original's division" {
+    const division = struct {
+        fn f(a: i32, b: i32) bool {
+            const short_max = std.math.maxInt(i16);
+            const short_min = std.math.minInt(i16);
+            if (b == 0 or b == -1) return true;
+            if ((a >= 0) == (b >= 0)) return a <= @divTrunc(short_max, b);
+            if (b < 0) return a <= @divTrunc(short_min, b);
+            return a >= @divTrunc(short_min, b);
+        }
+    }.f;
+    for (0..std.math.maxInt(u16) + 1) |wide| {
+        const b: u16 = @intCast(wide);
+        // Around each side's limit, and the ends of an `int`.
+        const divisor: i32 = @max(b, 1);
+        const limits = [_]i32{
+            0,
+            @divTrunc(std.math.maxInt(i16), divisor),
+            @divTrunc(std.math.minInt(i16), divisor),
+        };
+        for (limits) |limit| {
+            var a = limit -| 2;
+            while (a <= limit +| 2) : (a += 1) {
+                try std.testing.expectEqual(division(a, b), mul2ShortsValid(a, b));
+            }
+        }
+        for ([_]i32{ std.math.minInt(i32), std.math.maxInt(i32) }) |a| {
+            try std.testing.expectEqual(division(a, b), mul2ShortsValid(a, b));
+        }
     }
 }
