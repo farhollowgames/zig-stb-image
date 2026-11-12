@@ -1520,26 +1520,45 @@ fn idctBlock(out: []u8, out_stride: usize, data: *const [64]i16) error{Overflow}
     }
 }
 
-/// One pass of `stbi__idct_simd`, the original's SSE2 IDCT, lane by lane:
-/// the scalar pass's arithmetic regrouped, with sums of inputs in 16 bits,
-/// products and sums in 32 bits, all wrapping, and the results saturated
-/// to 16 bits.
-fn idct1dSse2(s: [8]i16, comptime bias: i32, comptime shift: u5) [8]i16 {
+/// Eight 16-bit values, one per column (or row) of a block.
+const I16x8 = @Vector(8, i16);
+const I32x8 = @Vector(8, i32);
+
+/// One pass of `stbi__idct_simd`, the original's SSE2 IDCT, over eight
+/// columns at once (lane `i` is column `i`): the scalar pass's arithmetic
+/// regrouped, with sums of inputs in 16 bits, products and sums in 32 bits,
+/// all wrapping, and the results saturated to 16 bits.
+fn idctPassSse2(s: [8]I16x8, comptime bias: i32, comptime shift: u5) [8]I16x8 {
     const a = comptime f2f(0.5411961);
     const d = comptime f2f(1.175875602);
     const k = comptime f2f(-1.961570560);
     const l = comptime f2f(-0.390180644);
-    // `_mm_madd_epi16`: two 16-bit products summed.
-    const rot = struct {
-        fn f(x: i16, y: i16, comptime cx: i16, comptime cy: i16) i32 {
-            return @as(i32, x) * cx +% @as(i32, y) * cy;
+    const ops = struct {
+        fn widen(x: I16x8) I32x8 {
+            return x;
         }
-    }.f;
+        // `_mm_madd_epi16`: two 16-bit products summed. No product of a
+        // 16-bit value and these constants (below 2^13) overflows.
+        fn rot(x: I16x8, y: I16x8, comptime cx: i32, comptime cy: i32) I32x8 {
+            const vx: I32x8 = @splat(cx);
+            const vy: I32x8 = @splat(cy);
+            return widen(x) * vx +% widen(y) * vy;
+        }
+        // `_mm_packs_epi32` saturates.
+        fn pack(x: I32x8) I16x8 {
+            const low: I32x8 = @splat(std.math.minInt(i16));
+            const high: I32x8 = @splat(std.math.maxInt(i16));
+            return @truncate(@min(@max(x >> @splat(shift), low), high));
+        }
+    };
+    const rot = ops.rot;
+    const pack = ops.pack;
+    const scale: I32x8 = @splat(4096);
     // Even part.
     const t2e = rot(s[2], s[6], a, a + f2f(-1.847759065));
     const t3e = rot(s[2], s[6], a + f2f(0.765366865), a);
-    const t0e = @as(i32, s[0] +% s[4]) * 4096;
-    const t1e = @as(i32, s[0] -% s[4]) * 4096;
+    const t0e = ops.widen(s[0] +% s[4]) * scale;
+    const t1e = ops.widen(s[0] -% s[4]) * scale;
     const x0 = t0e +% t3e;
     const x3 = t0e -% t3e;
     const x1 = t1e +% t2e;
@@ -1557,38 +1576,63 @@ fn idct1dSse2(s: [8]i16, comptime bias: i32, comptime shift: u5) [8]i16 {
     const x5 = y1o +% y5o;
     const x6 = y2o +% y5o;
     const x7 = y3o +% y4o;
-    // `_mm_packs_epi32` saturates.
-    const pack = struct {
-        fn f(x: i32) i16 {
-            return @intCast(std.math.clamp(x >> shift, std.math.minInt(i16), std.math.maxInt(i16)));
-        }
-    }.f;
+    const b: I32x8 = @splat(bias);
     return .{
-        pack(x0 +% bias +% x7),
-        pack(x1 +% bias +% x6),
-        pack(x2 +% bias +% x5),
-        pack(x3 +% bias +% x4),
-        pack(x3 +% bias -% x4),
-        pack(x2 +% bias -% x5),
-        pack(x1 +% bias -% x6),
-        pack(x0 +% bias -% x7),
+        pack(x0 +% b +% x7),
+        pack(x1 +% b +% x6),
+        pack(x2 +% b +% x5),
+        pack(x3 +% b +% x4),
+        pack(x3 +% b -% x4),
+        pack(x2 +% b -% x5),
+        pack(x1 +% b -% x6),
+        pack(x0 +% b -% x7),
     };
+}
+
+/// The 8 by 8 transpose of `rows`, by three rounds of interleaving pairs.
+fn transpose(rows: [8]I16x8) [8]I16x8 {
+    // `_mm_unpacklo_epi16` and `_mm_unpackhi_epi16`: lanes taken in turn
+    // from the low or high halves of `x` and `y` (`~i` is `y`'s lane `i`).
+    const low = comptime interleave(0);
+    const high = comptime interleave(4);
+    var r = rows;
+    inline for ([_][4][2]usize{
+        .{ .{ 0, 4 }, .{ 1, 5 }, .{ 2, 6 }, .{ 3, 7 } },
+        .{ .{ 0, 2 }, .{ 1, 3 }, .{ 4, 6 }, .{ 5, 7 } },
+        .{ .{ 0, 1 }, .{ 2, 3 }, .{ 4, 5 }, .{ 6, 7 } },
+    }) |round| {
+        inline for (round) |pair| {
+            const x = r[pair[0]];
+            const y = r[pair[1]];
+            r[pair[0]] = @shuffle(i16, x, y, low);
+            r[pair[1]] = @shuffle(i16, x, y, high);
+        }
+    }
+    return r;
+}
+
+fn interleave(comptime first: i32) @Vector(8, i32) {
+    var mask: [8]i32 = undefined;
+    for (0..4) |i| {
+        const lane = first + @as(i32, @intCast(i));
+        mask[2 * i] = lane;
+        mask[2 * i + 1] = ~lane;
+    }
+    return mask;
 }
 
 /// `stbi__idct_simd`: the block's samples as the original's SSE2 build
 /// computes them. Defined for every input.
 fn idctBlockSse2(out: []u8, out_stride: usize, data: *const [64]i16) void {
-    var val: [64]i16 = undefined;
-    for (0..8) |i| {
-        var column: [8]i16 = undefined;
-        for (&column, 0..) |*value, row| value.* = data[row * 8 + i];
-        const result = idct1dSse2(column, column_bias, column_shift);
-        for (result, 0..) |value, row| val[row * 8 + i] = value;
-    }
-    for (0..8) |row| {
-        const result = idct1dSse2(val[row * 8 ..][0..8].*, row_bias, row_shift);
-        const o = out[row * out_stride ..][0..8];
-        for (o, result) |*sample, value| sample.* = @intCast(std.math.clamp(value, 0, 255));
+    var rows: [8]I16x8 = undefined;
+    for (&rows, 0..) |*row, i| row.* = data[i * 8 ..][0..8].*;
+    const columns = idctPassSse2(rows, column_bias, column_shift);
+    const samples = transpose(idctPassSse2(transpose(columns), row_bias, row_shift));
+    const zero: I16x8 = @splat(0);
+    const max: I16x8 = @splat(255);
+    for (samples, 0..) |row, i| {
+        const bytes: @Vector(8, u8) = @intCast(@min(@max(row, zero), max));
+        out[i * out_stride ..][0..8].* = bytes;
     }
 }
 
@@ -1629,4 +1673,94 @@ pub fn info(source: *Source) ?common.Info {
         .height = source.img_y,
         .channels_in_file = if (source.img_n >= 3) 3 else 1,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// The SSE2 IDCT one lane at a time, as the C intrinsics define each lane:
+/// the reference for `idctBlockSse2`'s vector code.
+fn idctBlockSse2Lanes(out: []u8, out_stride: usize, data: *const [64]i16) void {
+    const pass = struct {
+        fn rot(x: i16, y: i16, comptime cx: i32, comptime cy: i32) i32 {
+            return @as(i32, x) * cx +% @as(i32, y) * cy;
+        }
+        fn pack(x: i32, comptime shift: u5) i16 {
+            return @intCast(std.math.clamp(x >> shift, std.math.minInt(i16), std.math.maxInt(i16)));
+        }
+        fn f(s: [8]i16, comptime bias: i32, comptime shift: u5) [8]i16 {
+            const a = comptime f2f(0.5411961);
+            const d = comptime f2f(1.175875602);
+            const k = comptime f2f(-1.961570560);
+            const l = comptime f2f(-0.390180644);
+            const t2e = rot(s[2], s[6], a, a + f2f(-1.847759065));
+            const t3e = rot(s[2], s[6], a + f2f(0.765366865), a);
+            const t0e = @as(i32, s[0] +% s[4]) * 4096;
+            const t1e = @as(i32, s[0] -% s[4]) * 4096;
+            const x0 = t0e +% t3e;
+            const x3 = t0e -% t3e;
+            const x1 = t1e +% t2e;
+            const x2 = t1e -% t2e;
+            const y0o = rot(s[7], s[3], k + f2f(0.298631336), k);
+            const y2o = rot(s[7], s[3], k, k + f2f(3.072711026));
+            const y1o = rot(s[5], s[1], l + f2f(2.053119869), l);
+            const y3o = rot(s[5], s[1], l, l + f2f(1.501321110));
+            const sum17 = s[1] +% s[7];
+            const sum35 = s[3] +% s[5];
+            const y4o = rot(sum17, sum35, d + f2f(-0.899976223), d);
+            const y5o = rot(sum17, sum35, d, d + f2f(-2.562915447));
+            const x4 = y0o +% y4o;
+            const x5 = y1o +% y5o;
+            const x6 = y2o +% y5o;
+            const x7 = y3o +% y4o;
+            return .{
+                pack(x0 +% bias +% x7, shift),
+                pack(x1 +% bias +% x6, shift),
+                pack(x2 +% bias +% x5, shift),
+                pack(x3 +% bias +% x4, shift),
+                pack(x3 +% bias -% x4, shift),
+                pack(x2 +% bias -% x5, shift),
+                pack(x1 +% bias -% x6, shift),
+                pack(x0 +% bias -% x7, shift),
+            };
+        }
+    }.f;
+    var val: [64]i16 = undefined;
+    for (0..8) |i| {
+        var column: [8]i16 = undefined;
+        for (&column, 0..) |*value, row| value.* = data[row * 8 + i];
+        const result = pass(column, column_bias, column_shift);
+        for (result, 0..) |value, row| val[row * 8 + i] = value;
+    }
+    for (0..8) |row| {
+        const result = pass(val[row * 8 ..][0..8].*, row_bias, row_shift);
+        const o = out[row * out_stride ..][0..8];
+        for (o, result) |*sample, value| sample.* = @intCast(std.math.clamp(value, 0, 255));
+    }
+}
+
+test "the vector SSE2 IDCT gives the samples of the SSE2 IDCT computed lane by lane" {
+    var prng: std.Random.DefaultPrng = .init(0x1dc7);
+    const random = prng.random();
+    for (0..200_000) |case| {
+        var data: [64]i16 = undefined;
+        // Full-range values, values of real images' size, and sparse blocks.
+        const magnitude: i16 = switch (case % 4) {
+            0 => std.math.maxInt(i16),
+            1 => 2048,
+            else => 300,
+        };
+        for (&data) |*d| {
+            d.* = random.intRangeAtMost(i16, -magnitude, magnitude);
+            if (case % 4 == 3 and random.uintLessThan(u8, 8) != 0) d.* = 0;
+        }
+        if (case < 64) data = @splat(if (case % 2 == 0) std.math.minInt(i16) else 0);
+        if (case < 64) data[case] = std.math.maxInt(i16);
+        var expected: [8 * 11]u8 = @splat(0xaa);
+        var actual: [8 * 11]u8 = @splat(0xaa);
+        idctBlockSse2Lanes(&expected, 11, &data);
+        idctBlockSse2(&actual, 11, &data);
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
 }
