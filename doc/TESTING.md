@@ -114,9 +114,14 @@ samples by value, floats by their bits), the failure reason in its short and
 long forms, and, for loads from a file, where the file is left afterwards.
 `oracle.expectAllSame` runs a file through every combination the API has:
 8-bit, 16-bit and float, each requested component count, flipped and not,
-from memory, from a reader and from a file at an offset, and the info,
-16-bit and HDR queries, each through the same three sources. GIFs are also
-loaded as animations, comparing every frame and every delay.
+from memory, from a reader, from a file at an offset and by path (against
+`stbi_load`, `stbi_load_16` and `stbi_loadf` on the same file), and through
+a file reader that cannot seek, against the original's `FILE` (results
+compared, not where the file is left), and the info, 16-bit and HDR queries through each of those five sources. A
+query runs on both builds of the original and compares both reason forms.
+Where the two builds disagree on an input that is not a JPEG, the test
+fails instead of following one of them. GIFs are also loaded as
+animations, comparing every frame and every delay.
 
 ### The inputs
 
@@ -206,7 +211,10 @@ unwritten), the tests run it with fresh allocations filled with three
 different bytes; if the results differ, the port must refuse. The BMP
 inputs naming unset palette entries are compared by size and channels
 (`oracle.Expect.same_size`, and the fuzz test's `unset_pixels` cases), and
-their pixels against the files' own palettes.
+their pixels against the files' own palettes. For the fuzz cases, a copy
+of the input with every palette entry the original reads made white is
+also loaded by both builds: each pixel from a read entry is compared with
+them, and each from an unset entry must be zero.
 
 ### Settings and threads
 
@@ -214,8 +222,21 @@ stb_image has global settings and thread-local overrides (flip,
 unpremultiply, iPhone conversion). The port has the same in
 `stbi.settings`, and per call in `Options`. "settings: …" runs a scripted
 sequence of global and thread-local changes on two threads at once, on the
-port and the original, and compares the flags each thread sees. The
-decoders keep no state between calls.
+port and the original, and compares the flags each thread sees; another
+test sets the HDR gamma and scale, which are global only, and checks that
+loads on other threads use them as the original's do. The decoders keep
+no state between calls.
+
+### Limits and format switches
+
+`test/limits_test.zig` checks `Limits.bytes_max` on BMP, TGA, PSD and PNM:
+an image at the limit loads, one byte past fails as the original fails
+past `INT_MAX`, a conversion to more components is checked too, and a
+PNG's inflated data grows past the limit as the original's grows past
+`INT_MAX` (the limit bounds image buffers, not all memory).
+`test/formats_test.zig` runs on two more builds of the port, one without
+JPEG, BMP, GIF, PIC and PNM and one with only those: a file of a format
+left out fails as an unknown image type, and the others load.
 
 ### Failed allocations
 
@@ -235,5 +256,7 @@ doubles, and on the special values. All match bit for bit.
 
 The tests run in ReleaseSafe by default; `-Dtest-optimize` selects another
 mode. The original is always built at `-O3`. On 12 November 2026 every test
-passed in ReleaseSafe on x86-64 Linux (glibc 2.44), with the JPEG tests in
-both `-Djpeg-idct` modes.
+passed on x86-64 Linux (glibc 2.44) in ReleaseSafe and in ReleaseFast:
+182 tests in each (9 unit tests, 171 against the original, and one on each
+of the two format-switch builds). The JPEG tests also passed with
+`-Djpeg-idct=scalar`.

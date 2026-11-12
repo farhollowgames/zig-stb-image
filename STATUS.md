@@ -94,15 +94,13 @@ performance pass, the skeptic's review, the fixes) are not started.
   memory-only bench rows, and stale docs. No unsafe input was found in the
   fast paths (the whole suite also passes in ReleaseFast). Probes:
   `skeptic/probes`, `test/skeptic_probes.zig`.
-- **In progress:** step 7 on `fix/skeptic` (worktree
-  `~/Projects/zig-stb-image.wt/fix`; its STATUS.md subsection "Step 7:
-  fixes" tracks each finding), and the sanitizer matching on
-  `review/sanitize` (worktree `~/Projects/zig-stb-image.wt/sanitize`):
-  `zig build sanitize` says for each call the original is unsafe on whether
-  the port refuses it, run over every test file.
+- **Step 7 is done** on `fix/skeptic` (worktree
+  `~/Projects/zig-stb-image.wt/fix`, with `review/perf-and-skeptic` merged
+  in; the subsection "Step 7: fixes" has each finding), not yet merged
+  back.
 - **Left to do:**
-  1. Merge `fix/skeptic` and `review/sanitize`; act on any unsafe input
-     the port accepts.
+  1. Merge `fix/skeptic` into `review/perf-and-skeptic`; rerun the
+     sanitizer pass, whose PIC counts change with the empty-image fix.
   2. Merge `main` (where another agent fixes the READMEs) into this branch,
      then update README.md: `-Djpeg-idct` defaults to `sse2` on x86-64, the
      BMP palette change, the "Not included" link (`#left-out-approved`),
@@ -189,7 +187,12 @@ test that fails before the fix where there was a bug. One commit each.
    as stored (`stbi__getn`, no byte swap), and so does the port: there is
    no per-sample loop to make faster. pnm 8-bit 0.99, pnm 16-bit 1.00
    (`--filter pnm --rounds 3`).
-8. **Docs:** not started.
+8. **Docs: done.** `doc/TESTING.md` describes the path and streaming
+   comparisons, queries on both builds, the build disagreement check, the
+   BMP unset-entry compare, the gamma and scale test, the limits and format
+   switch tests, and both build modes' full runs. `doc/BENCHMARKS.md`
+   describes the reader and file rows in place of the stale BMP, PSD and
+   PNG palette bullets.
 9. **PIC files of no width or height whose core fails: done.** After
    merging `review/perf-and-skeptic`. The original converts its null image
    over no pixels and returns an empty image for 1 to 3 components, and for
@@ -199,8 +202,10 @@ test that fails before the fix where there was a bug. One commit each.
    the original", now with bad packet types and bytes after the packets,
    failed first. Fuzz case 974 (0 x 0) left `test/pic_unsafe.zig`.
 
-- **Resume:** the next finding not done above; `stbi-build <worktree> test
-  -Dtest-filter=<name>` while working, the full run before each commit.
+- **Every finding is done.** The full run passes in ReleaseSafe and in
+  ReleaseFast: 182 tests (9 unit, 171 against the original, 1 on each of
+  the two format-switch builds); the JPEG tests also with
+  `-Djpeg-idct=scalar`.
 - **Known difference, not fixed:** on a `FILE` that cannot seek (a pipe),
   the original's skips (`fseek` forward) fail and skip nothing, so it reads
   the skipped bytes as data; the port's reader skips them. The port gives
