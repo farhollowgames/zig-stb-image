@@ -31,10 +31,18 @@ pub fn convert8To16(gpa: std.mem.Allocator, narrow: []u8) Error![]u16 {
 /// Swaps the rows of `pixels`, `height` rows of `width * comp` samples.
 pub fn verticalFlip(comptime T: type, pixels: []T, width: u32, height: u32, comp: u32) void {
     const row_len = @as(usize, width) * comp;
+    // 64 bytes at a time, which the compiler moves as vectors.
+    const chunk = 64 / @sizeOf(T);
     for (0..height / 2) |row| {
         const top = pixels[row * row_len ..][0..row_len];
         const bottom = pixels[(height - 1 - row) * row_len ..][0..row_len];
-        for (top, bottom) |*a, *b| std.mem.swap(T, a, b);
+        var i: usize = 0;
+        while (i + chunk <= row_len) : (i += chunk) {
+            const saved = top[i..][0..chunk].*;
+            top[i..][0..chunk].* = bottom[i..][0..chunk].*;
+            bottom[i..][0..chunk].* = saved;
+        }
+        for (top[i..], bottom[i..]) |*a, *b| std.mem.swap(T, a, b);
     }
 }
 
