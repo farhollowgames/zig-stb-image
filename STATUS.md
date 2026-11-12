@@ -131,14 +131,14 @@ before and after are from the same session.
   to 0.65. The vertical flip in 64-byte pieces: tga rle 0.97 to 0.82.
   `convertFormat` 16 pixels at a time with one-operand shuffles, and four
   new bench rows that go through a conversion: tga raw to rgba 1.57 to
-  0.63, tga raw to grey 1.68 to 0.51, psd raw to rgb 0.76 to 0.65.
+  0.63, tga raw to grey 1.68 to 0.51, psd raw to rgb 0.76 to 0.65. PSD
+  PackBits literal runs copied from the buffer: psd rle 1.50 to 0.84.
 - **Now:** bmp 24-bit 0.06, bmp 32-bit 0.05, bmp 24-bit to rgba 0.14, psd
-  raw 0.65, psd rle 1.31, psd raw to rgb 0.65, tga raw 0.28, tga rle 0.82,
+  raw 0.65, psd rle 0.84, psd raw to rgb 0.65, tga raw 0.28, tga rle 0.82,
   tga raw to rgba 0.63, tga raw to grey 0.51, pnm 8-bit 1.03, pnm 16-bit
   1.01 (PNM from the noisy first run). The full test run passed after the
   conversion change.
-- **Next:** PSD RLE: literal runs from the buffer (in the worktree, not yet
-  measured); then a full bench table.
+- **Next:** the full bench table, and the full test run once more.
 - **Found:** a two-operand `@shuffle` that interleaves two vectors
   compiled to code twice as slow as the scalar loop; fixed-size `inline
   for` loops over arrays vectorize well for that. One-operand shuffles,

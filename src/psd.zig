@@ -32,7 +32,12 @@ fn decodeRle(source: *Source, out: []u8, pixel_count: usize) bool {
             len += 1;
             if (len > left) return false;
             count += len;
-            for (0..len) |_| {
+            if (source.takeBuffered(len)) |run| {
+                for (run) |byte| {
+                    out[p] = byte;
+                    p += 4;
+                }
+            } else for (0..len) |_| {
                 out[p] = source.get8();
                 p += 4;
             }
