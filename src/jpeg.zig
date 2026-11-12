@@ -366,25 +366,44 @@ const Decoder = struct {
         if (!mul2ShortsValid(dc, dequant[0])) return z.source.fail(error.CannotMergeDcAndAc);
         data[0] = @intCast(dc * dequant[0]);
 
+        // The loop keeps the bit buffer in locals, which a call cannot
+        // change, so they stay in registers; `z` gets them back around each
+        // call and at the end.
+        var buffer = z.code_buffer;
+        var bits = z.code_bits;
         var k: u32 = 1;
         while (true) {
-            if (z.code_bits < 16) z.growBuffer();
-            const c = (z.code_buffer >> (32 - fast_bits)) & fast_mask;
+            if (bits < 16) {
+                z.code_buffer = buffer;
+                z.code_bits = bits;
+                z.growBuffer();
+                buffer = z.code_buffer;
+                bits = z.code_bits;
+            }
+            const c = (buffer >> (32 - fast_bits)) & fast_mask;
             const r: i32 = fac[c];
             if (r != 0) {
                 k += @intCast((r >> 4) & 15);
                 const s = r & 15;
-                if (s > z.code_bits) return z.source.fail(error.JpegBadHuffmanLength);
-                z.code_buffer <<= @intCast(s);
-                z.code_bits -= s;
+                if (s > bits) {
+                    z.code_buffer = buffer;
+                    z.code_bits = bits;
+                    return z.source.fail(error.JpegBadHuffmanLength);
+                }
+                buffer <<= @intCast(s);
+                bits -= s;
                 const zig = dezigzag[k];
                 k += 1;
                 data[zig] = @truncate((r >> 8) * dequant[zig]);
             } else {
+                z.code_buffer = buffer;
+                z.code_bits = bits;
                 const rs = z.huffDecode(hac) orelse return z.source.fail(error.JpegBadHuffmanCode);
                 const s: u5 = @intCast(rs & 15);
                 const run = rs >> 4;
                 if (s == 0) {
+                    buffer = z.code_buffer;
+                    bits = z.code_bits;
                     if (rs != 0xf0) break; // end of block
                     k += 16;
                 } else {
@@ -392,10 +411,14 @@ const Decoder = struct {
                     const zig = dezigzag[k];
                     k += 1;
                     data[zig] = @truncate(z.extendReceive(s) * dequant[zig]);
+                    buffer = z.code_buffer;
+                    bits = z.code_bits;
                 }
             }
             if (k >= 64) break;
         }
+        z.code_buffer = buffer;
+        z.code_bits = bits;
     }
 
     /// `stbi__jpeg_decode_block_prog_dc`: the DC coefficient of a block in
