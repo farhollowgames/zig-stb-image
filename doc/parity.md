@@ -167,14 +167,20 @@ doubles`, `… on special values` (`test/pow_test.zig`).
 ## PIC
 
 - **A failure in the packets or the scanlines.** The original then converts
-  its null image to the components asked for. That returns the failure only
-  when the conversion keeps 4 components; otherwise it reads the null
-  image, or, when no components were asked for and the packets were not
-  read, uses the caller's `*comp` (an assert in a debug build). The port
-  returns the failure for every request. Tests: `PIC loads refuse a
-  scanline failure the original converts from a null image`, and every PIC
-  test, which compares the loads of 4 components and expects the port to
-  refuse the others; fuzz cases in `test/pic_unsafe.zig`.
+  its null image to the components asked for, or to the file's when none
+  were asked for. That returns the failure when the conversion keeps 4
+  components. With no pixels (no width or no height) the other
+  conversions read nothing and return an empty image, which the port also
+  returns; its `channels_in_file` is the file's 3 or 4 when the packets
+  set it, and 0 where the original leaves the caller's `*comp` as it was.
+  With pixels the original reads the null image, and with no components
+  asked for before the packets set the file's it uses the caller's
+  `*comp` (an assert in a debug build): the port returns the failure for
+  these. Tests: `PIC loads refuse a scanline failure the original converts
+  from a null image`, `PIC files of no width or height decode as in the
+  original`, and every PIC test, which compares the loads the original
+  converts safely and expects the port to refuse the others; fuzz cases
+  in `test/pic_unsafe.zig`.
 
 ## BMP
 

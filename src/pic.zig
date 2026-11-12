@@ -153,11 +153,14 @@ fn readScanlines(
 /// the file's 3 or 4.
 ///
 /// When the packets or the scanlines fail, the original converts the null
-/// image it is left with to the requested components: it returns the
-/// failure only where none are asked for and the file has alpha, or 4 are
-/// asked for. Elsewhere it reads the null image, or with nothing asked for
-/// before the packets were read, it uses the caller's `*comp` (an assert in
-/// a debug build). The port returns the failure in all of these.
+/// image it is left with to the requested components, or to the file's
+/// when none are asked for: 4 give the failure, as nothing is converted.
+/// With no pixels, 1 to 3 convert nothing and give an empty image, as the
+/// port does; its `channels_in_file` is the file's 3 or 4 if the packets
+/// set it, else 0 where the original leaves the caller's `*comp`. With
+/// pixels it reads the null image, and with nothing asked for before the
+/// packets set the file's components it uses the caller's `*comp` (an
+/// assert in a debug build): the port returns the failure in these.
 pub fn load(
     gpa: std.mem.Allocator,
     source: *Source,
@@ -179,15 +182,17 @@ pub fn load(
     // The image is read as RGBA, opaque white where no packet writes.
     const result = try common.allocChecked(u8, gpa, limits, &.{ x, y, 4 }, 0);
     var comp: u3 = 0;
-    {
-        errdefer gpa.free(result);
-        @memset(result, 0xff);
-        var packets: [max_packets]Packet = undefined;
-        const used = try readPackets(source, &packets, &comp);
-        try readScanlines(source, used, x, y, result);
-    }
-
+    @memset(result, 0xff);
+    var packets: [max_packets]Packet = undefined;
+    const core: Error!void = if (readPackets(source, &packets, &comp)) |used|
+        readScanlines(source, used, x, y, result)
+    else |err|
+        err;
     const req_comp = if (request.req_comp == 0) comp else request.req_comp;
+    core catch |err| if (@as(u64, x) * y != 0 or req_comp == 0 or req_comp == 4) {
+        gpa.free(result);
+        return err;
+    };
     return .{
         .pixels = .{ .u8 = try common.convertFormat(gpa, limits, result, 4, req_comp, x, y) },
         .width = x,

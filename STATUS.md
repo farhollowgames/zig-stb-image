@@ -46,12 +46,9 @@
   palette, TGA raw, HDR flat and JPEG-block cases, and PIC loads with no
   components asked for whose packets fail before the channel count is set
   (the original reads the caller's `*comp`).
-- **Open (for the author):** PIC files of no width or height whose packets
-  fail ("empty", 108 calls of 1 to 3 components): the original converts its
-  null image over no pixels and returns an empty image, which the
-  sanitizers do not flag; the port refuses, as for every PIC packet
-  failure. `doc/parity.md` describes the refusal but not that the
-  original is safe there.
+- **Done (step 7, item 9):** PIC files of no width or height whose packets
+  or scanlines fail now load as the original's: an empty image for 1 to 3
+  components, and for the file's 3 when the packets set it.
 - **Next:** steps 5 to 7 (see "Work in progress").
 
 Every public function, build option and format of stb_image 2.30 (stb
@@ -188,8 +185,19 @@ test that fails before the fix where there was a bug. One commit each.
    to 0.15/0.25, psd raw 1.09/1.09 to 0.85/0.89, psd rle 1.21/1.15 to
    0.83/0.84; png rgb 0.83 and jpeg 0.53 to 0.55 did not move. The oracle
    tests already load every file both ways, so no new test.
-7. **PNM 16-bit:** not started.
+7. **PNM 16-bit: no change.** The original copies the big-endian samples
+   as stored (`stbi__getn`, no byte swap), and so does the port: there is
+   no per-sample loop to make faster. pnm 8-bit 0.99, pnm 16-bit 1.00
+   (`--filter pnm --rounds 3`).
 8. **Docs:** not started.
+9. **PIC files of no width or height whose core fails: done.** After
+   merging `review/perf-and-skeptic`. The original converts its null image
+   over no pixels and returns an empty image for 1 to 3 components, and for
+   no components asked for once the packets set the file's 3; the port now
+   returns the same (`channels_in_file` 0 where the original leaves the
+   caller's `*comp`). Test: "PIC files of no width or height decode as in
+   the original", now with bad packet types and bytes after the packets,
+   failed first. Fuzz case 974 (0 x 0) left `test/pic_unsafe.zig`.
 
 - **Resume:** the next finding not done above; `stbi-build <worktree> test
   -Dtest-filter=<name>` while working, the full run before each commit.
@@ -400,7 +408,8 @@ with an error (`doc/parity.md` has each one and its test):
   (`GifFlipComponents`); rows past the 32-bit range (`TooLargeGif`).
 - HDR: flat pixels that end early (`HdrTruncated`); info on a negative
   size.
-- PIC: a packet or scanline failure loaded to other than 4 components.
+- PIC: a packet or scanline failure loaded to other than 4 components,
+  except where the image has no pixels and the channel count is known.
 
 ### BMP, TGA, PSD and PNM
 

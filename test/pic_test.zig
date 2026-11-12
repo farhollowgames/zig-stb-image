@@ -46,38 +46,58 @@ fn coreFails(bytes: []const u8) bool {
     return false;
 }
 
+/// What the original gives on a load of `components` from `bytes`, whose
+/// packets or scanlines fail, through `via`. It converts the null image it
+/// is left with: 4 components fail, as nothing is converted. With no
+/// pixels, 1 to 3 give an empty image, and so does the file's 3 when the
+/// packets have set it; with nothing asked for before then it uses the
+/// caller's `*comp`, which the port refuses. With pixels, every conversion
+/// reads the null image, which the port refuses.
+fn failedLoad(bytes: []const u8, components: stbi.Components, via: oracle.Via) oracle.Expect {
+    if (components == .rgba) return .same;
+    if (std.mem.readInt(u16, bytes[92..94], .big) != 0 and
+        std.mem.readInt(u16, bytes[94..96], .big) != 0) return .port_refuses;
+    if (components != .file) return .same;
+    var reader: std.Io.Reader = .fixed(bytes);
+    const rgba = if (via == .memory)
+        stbi.loadFromMemory(u8, gpa, bytes, .{ .components = .rgba })
+    else
+        stbi.loadFromReader(u8, gpa, &reader, .{ .components = .rgba });
+    if (rgba) |image| {
+        var copy = image;
+        copy.deinit(gpa);
+        return .same;
+    } else |err| return switch (err) {
+        error.PicTooManyPackets, error.PicShortPackets, error.PicPacketNot8Bit => .port_refuses,
+        else => .same,
+    };
+}
+
 /// Every load and query of `bytes` against the original. Where the packets
-/// or scanlines fail, the loads of 4 components are compared, and the port
-/// must refuse the others, which the original converts from a null image.
+/// or scanlines fail, the loads the original converts safely are compared,
+/// and the port must refuse the others (see `failedLoad`).
 fn expectPicSame(bytes: []const u8, label: oracle.Label) !void {
     if (!coreFails(bytes)) return oracle.expectAllSame(gpa, bytes, label);
     for ([_]oracle.Bits{ .u8, .u16, .f32 }) |bits| {
-        for (0..5) |comp| {
-            const components: stbi.Components = @fromBackingInt(@as(u3, @intCast(comp)));
-            const expect: oracle.Expect = if (components == .rgba) .same else .port_refuses;
+        for (std.enums.values(stbi.Components)) |components| {
             try oracle.expectLoadSame(
                 gpa,
                 bytes,
                 .{ .bits = bits, .options = .{ .components = components } },
                 label,
-                expect,
+                failedLoad(bytes, components, .memory),
             );
         }
         for ([_]oracle.Via{ .callbacks, .file }) |via| {
-            try oracle.expectLoadSame(
-                gpa,
-                bytes,
-                .{ .bits = bits, .via = via, .options = .{ .components = .rgba } },
-                label,
-                .same,
-            );
-            try oracle.expectLoadSame(
-                gpa,
-                bytes,
-                .{ .bits = bits, .via = via },
-                label,
-                .port_refuses,
-            );
+            for ([_]stbi.Components{ .rgb, .rgba, .file }) |components| {
+                try oracle.expectLoadSame(
+                    gpa,
+                    bytes,
+                    .{ .bits = bits, .via = via, .options = .{ .components = components } },
+                    label,
+                    failedLoad(bytes, components, via),
+                );
+            }
         }
     }
     for ([_]oracle.Query{ .info, .is_16_bit, .is_hdr }) |query| {
@@ -298,11 +318,22 @@ test "PIC files of every packet type and channel layout decode as in the origina
 }
 
 test "PIC files of no width or height decode as in the original" {
+    // Those that end after the packets fail there, before the channels are
+    // set; those with bad packet types and more bytes fail in the
+    // scanlines, after, when there are scanlines to read.
+    const bad_types = [_][]const Packet{
+        &.{.{ .type = 3, .channel = red | green | blue }},
+        &.{.{ .type = 3, .channel = red | green | blue | alpha }},
+    };
     for ([_][2]u16{ .{ 0, 3 }, .{ 3, 0 }, .{ 0, 0 } }) |size| {
-        for (layouts[0..4]) |layout| {
-            const bytes = try makePic(size[0], size[1], layout, .{}, 1);
-            defer gpa.free(bytes);
-            try expectPicSame(bytes, .{ .name = "empty" });
+        for (layouts[0..4] ++ bad_types) |layout| {
+            for ([_][]const u8{ "", "\x00\x01\x02\x03" }) |after| {
+                const image = try makePic(size[0], size[1], layout, .{}, 1);
+                defer gpa.free(image);
+                const bytes = try std.mem.concat(gpa, u8, &.{ image, after });
+                defer gpa.free(bytes);
+                try expectPicSame(bytes, .{ .name = "empty" });
+            }
         }
     }
 }
@@ -484,10 +515,12 @@ pub fn fuzzInputs(arena: std.mem.Allocator) ![]const []const u8 {
 }
 
 /// Whether a fuzz case's load is one the original is unsafe on: a failure
-/// of the packets or scanlines, converted to other than 4 components.
+/// of the packets or scanlines, converted from a null image of some pixels
+/// or with the caller's `*comp` (see `failedLoad`).
 pub fn unsafeCall(bytes: []const u8, request: oracle.Request) ?fuzz.Call {
-    if (request.options.components == .rgba) return null;
-    return if (coreFails(bytes)) .load else null;
+    if (!coreFails(bytes)) return null;
+    const expect = failedLoad(bytes, request.options.components, request.via);
+    return if (expect == .port_refuses) .load else null;
 }
 
 test "fuzz: mutated PIC files decode as in the original" {
