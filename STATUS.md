@@ -18,16 +18,17 @@
     thread locals, Windows UTF-8, static/STBIDEF;
   - refusals where the original is unsafe: zlib initial size 0 (loops for
     ever); PNG palette index past every PLTE; BMP palette index past the
-    palette (this refuses real OS/2 BMPs, `Core_1/4/8_Bit.bmp`,
-    `pal8os2sp.bmp`, because the original reads 4 entries too few); BMP
-    height -2^31; TGA raw cut short; PSD colour below the white matte; JPEG
-    blocks no scan wrote; JPEG scalar IDCT `int` overflow; GIF disposal 3
-    once two frames are out; GIF zero-area animation; flipped GIF animation
-    of 1 to 3 components; GIF rows past `int`; HDR flat pixels cut short;
-    PIC scanline failure converted from NULL.
-  - choices: the PNG and BMP palette cases could read unset entries as
-    zero instead of refusing; `-Djpeg-idct` defaults to scalar, where
-    upstream's x86-64 default is SSE2.
+    palette (since decided: such an entry now reads as zero, so the OS/2
+    BMPs `Core_1/4/8_Bit.bmp` and `pal8os2sp.bmp`, whose palette the
+    original reads 4 entries short, load); BMP height -2^31; TGA raw cut
+    short; PSD colour below the white matte; JPEG blocks no scan wrote;
+    JPEG scalar IDCT `int` overflow; GIF disposal 3 once two frames are
+    out; GIF zero-area animation; flipped GIF animation of 1 to 3
+    components; GIF rows past `int`; HDR flat pixels cut short; PIC
+    scanline failure converted from NULL.
+  - choices: the PNG palette case could read unset entries as zero
+    instead of refusing (decided so for BMP); `-Djpeg-idct` defaults to
+    scalar, where upstream's x86-64 default is SSE2.
 - **Open:** the sanitizer run is now one process per call (an overrun of
   the original corrupted the heap and ended the earlier whole run in the
   GIF tests), and the whole run takes longer than the 50-minute build
@@ -126,7 +127,7 @@ performance pass, the skeptic's review, the fixes) are not started.
 | PNG iPhone CgBI, BGR conversion and unpremultiply | `stbi__de_iphone` | as above | "png: the iPhone images …", "png: iPhone PNGs convert to RGB and unpremultiply …", "fuzz: mutated PNGs …" | oracle-tested |
 | zlib (inflate) | `stbi__zbuf`, `stbi__parse_zlib` | `src/zlib.zig` | "zlib: every block type and block size …", "zlib: corrupt, truncated and odd streams …", "zlib: zero bits past the end …", "zlib: initial sizes of 0 and 1 …", "zlib: the IDAT streams of the PNG corpus …", "fuzz: mutated zlib and raw DEFLATE streams …", "zlib: each allocation failure …" | oracle-tested |
 | TGA | `stbi__tga_*` | `src/tga.zig` | `test/tga_test.zig`: the TGA test suite, every image type, depth and origin, packets of every length, colour maps, headers, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
-| BMP | `stbi__bmp_*` | `src/bmp.zig` | `test/bmp_test.zig`: bmpsuite and libjpeg-turbo files, every header size and depth, bit-field masks of every width, zero alpha, palette sizes, bad headers, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
+| BMP | `stbi__bmp_*` | `src/bmp.zig` | `test/bmp_test.zig`: bmpsuite and libjpeg-turbo files, every header size and depth, bit-field masks of every width, zero alpha, palette sizes, entries past the palette (read as zero), bad headers, largest sizes, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
 | PSD (composited image, 8 and 16 bits, RLE and raw) | `stbi__psd_*` | `src/psd.zig` | `test/psd_test.zig`: the psd-tools PSD and PSB files, channel counts 0 to 56 at both depths and compressions, PackBits of every length byte, header fields, largest sizes, the 16-bit request and query, every cut, 3,000 fuzz cases, allocation failures | oracle-tested |
 | GIF, first frame | `stbi__gif_load` | `src/gif.zig` | `test/gif_test.zig`: the corpus, every LZW code size and stream shape, full code tables, corrupt rasters, interlace, palettes and transparency, frames off the canvas, extensions, headers, truncation, limits, allocation failures, 2,000 fuzz cases | oracle-tested |
 | GIF, every frame | `stbi_load_gif_from_memory` | `loadGifFromMemory` | as above, every test also as an animation: every disposal method, delays, frames kept after a failure; refusals in `doc/parity.md` | oracle-tested |
@@ -257,14 +258,15 @@ with an error (`doc/parity.md` has each one and its test):
 ### BMP, TGA, PSD and PNM
 
 Inputs the original is unsafe or undefined on, which the port refuses
-(`doc/parity.md` has each, with its test):
+unless said otherwise (`doc/parity.md` has each, with its test):
 
 - BMP: a pixel naming a palette entry past the palette, read by the
-  original from uninitialized stack memory (`error.BmpPaletteIndex`). Every
-  OS/2 BMP using one of its last four palette entries is such a file, as the
+  original from uninitialized stack memory, reads as zero in the port
+  (black, opaque at four components); it is not refused. Every OS/2 BMP
+  using one of its last four palette entries is such a file, as the
   original reads four entries fewer than an OS/2 palette holds: bmpsuite's
   `Core_1_Bit.bmp`, `Core_4_Bit.bmp`, `Core_8_Bit.bmp` and `pal8os2sp.bmp`,
-  and `pal8badindex.bmp`.
+  and `pal8badindex.bmp`; they load.
 - BMP: a stored height of -2^31, whose `abs()` is undefined
   (`error.DimensionTooLarge`, as the original reports in practice).
 - TGA: a raw true-colour or grey image cut short, whose missing rows the

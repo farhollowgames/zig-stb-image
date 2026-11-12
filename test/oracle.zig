@@ -68,14 +68,14 @@ pub const upstream = struct {
     pub extern fn scalar_get_flags(flip: *c_int, unpremultiply: *c_int, iphone: *c_int) void;
 };
 
-fn loadFn(path: Path) *const fn ([*]const u8, usize, c_int, *const Settings, *Result) callconv(.c) void {
+pub fn loadFn(path: Path) *const fn ([*]const u8, usize, c_int, *const Settings, *Result) callconv(.c) void {
     return switch (path) {
         .simd => &upstream.simd_load,
         .scalar => &upstream.scalar_load,
     };
 }
 
-fn freeFn(path: Path) *const fn (?*anyopaque) callconv(.c) void {
+pub fn freeFn(path: Path) *const fn (?*anyopaque) callconv(.c) void {
     return switch (path) {
         .simd => &upstream.simd_free,
         .scalar => &upstream.scalar_free,
@@ -264,6 +264,9 @@ pub const Expect = enum {
     /// allocated and never wrote (it changes with what fresh allocations
     /// hold, see `readsUnwritten`): then the port must refuse the input.
     same_unless_unwritten,
+    /// The original reads some pixels from memory it never wrote: both must
+    /// decode, to the same size and channels; the pixels are not compared.
+    same_size,
 };
 
 fn setMallocFill(path: Path, fill: c_int) void {
@@ -382,7 +385,7 @@ pub fn expectLoadSame(
     };
 
     const refuse = switch (expect) {
-        .same => false,
+        .same, .same_size => false,
         .port_refuses => true,
         .same_unless_unwritten => readsUnwritten(bytes, request, mem_file),
     };
@@ -415,6 +418,12 @@ pub fn expectLoadSame(
         if (disagree and path != followed_path) continue;
         switch (port) {
             .failure => |err| {
+                if (expect == .same_size) {
+                    label.print(request, "{t}: the port fails with {t} where it must decode", .{
+                        path, err,
+                    });
+                    return error.TestUnexpectedResult;
+                }
                 if (theirs.pixels != null) {
                     label.print(request, "{t}: the original decodes {d}x{d}x{d}, the port fails with {t}", .{
                         path, theirs.x, theirs.y, theirs.comp, err,
@@ -450,7 +459,8 @@ pub fn expectLoadSame(
                     label.print(request, "{t}: the port gives {d} bytes, not {d}", .{ path, ours.len, len });
                     return error.TestUnexpectedResult;
                 }
-                if (std.mem.indexOfDiff(u8, original[0..len], ours)) |at| {
+                const compared = if (expect == .same_size) 0 else len;
+                if (std.mem.indexOfDiff(u8, original[0..compared], ours[0..compared])) |at| {
                     label.print(request, "{t}: pixel bytes differ first at byte {d} of {d}: {d} against the port's {d}", .{
                         path, at, len, original[at], ours[at],
                     });

@@ -168,14 +168,18 @@ process.
 
 Where the original reads out of bounds, reads memory it never wrote,
 overflows an `int` or is otherwise undefined, the port returns an error of
-its own, the same in every build mode. [`parity.md`](parity.md) lists each
-case with its test. The tests check each refusal on hand-made inputs, and
-the fuzz tests list the generated cases the original is unsafe on
-(`test/*_unsafe.zig` and the lists in the test files), where they expect
-the refusal and do not compare. Where the original's result depends on
+its own, the same in every build mode; the one exception is a BMP palette
+entry the original never read, which the port reads as zero.
+[`parity.md`](parity.md) lists each case with its test. The tests check
+each refusal on hand-made inputs, and the fuzz tests list the generated
+cases the original is unsafe on (`test/*_unsafe.zig` and the lists in the
+test files), where they expect the refusal and do not compare. Where the original's result depends on
 memory it allocated but never wrote (a JPEG whose scans leave blocks
 unwritten), the tests run it with fresh allocations filled with three
-different bytes; if the results differ, the port must refuse.
+different bytes; if the results differ, the port must refuse. The BMP
+inputs naming unset palette entries are compared by size and channels
+(`oracle.Expect.same_size`, and the fuzz test's `unset_pixels` cases), and
+their pixels against the files' own palettes.
 
 ### Settings and threads
 

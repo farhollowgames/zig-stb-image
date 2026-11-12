@@ -25,6 +25,10 @@ pub const Config = struct {
     /// Cases the original is unsafe on, found by `zig build sanitize` with
     /// the default `-Dfuzz-seed`; the port must refuse them.
     unsafe: []const Unsafe = &.{},
+    /// Cases, with the default `-Dfuzz-seed`, whose pixels the original
+    /// reads from memory it never wrote: the port must decode them to the
+    /// original's size and channels; the pixels are not compared.
+    unset_pixels: []const u32 = &.{},
     /// Where the original's result depends on memory it never wrote, the
     /// port must refuse the case (`oracle.Expect.same_unless_unwritten`).
     refuse_unwritten: bool = false,
@@ -164,6 +168,11 @@ pub fn randomRequest(rng: std.Random) oracle.Request {
     };
 }
 
+fn unsetPixels(config: Config, case: u32) bool {
+    if (fuzz_options.fuzz_seed != 0 or fuzz_options.sanitize) return false;
+    return std.mem.indexOfScalar(u32, config.unset_pixels, case) != null;
+}
+
 fn unsafeCall(config: Config, case: u32, call: Call) bool {
     if (fuzz_options.fuzz_seed != 0 or fuzz_options.sanitize) return false;
     for (config.unsafe) |entry| {
@@ -189,6 +198,8 @@ pub fn run(gpa: std.mem.Allocator, config: Config, inputs: []const []const u8) !
         };
         const load_expect: oracle.Expect = if (unsafeCall(config, case_number, .load))
             .port_refuses
+        else if (unsetPixels(config, case_number))
+            .same_size
         else if (config.refuse_unwritten)
             .same_unless_unwritten
         else

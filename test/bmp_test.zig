@@ -6,14 +6,15 @@ const stbi = @import("stb_image");
 const oracle = @import("oracle.zig");
 const fuzz = @import("fuzz.zig");
 const corpus = @import("corpus.zig");
+const fuzz_options = @import("fuzz_options");
 
 const gpa = std.testing.allocator;
 
-/// Corpus files with a pixel naming a palette entry past the palette: the
-/// original reads it from uninitialized stack memory, the port refuses.
-/// Among them every OS/2 file with a palette: the original reads four
-/// entries fewer than such a file holds, none of a 1-bit palette.
-const refused = [_][]const u8{
+/// Corpus files with pixels naming palette entries the original never
+/// reads: it takes them from uninitialized stack memory, the port reads them
+/// as zero. Among them every OS/2 file with a palette: the original reads
+/// four entries fewer than such a file holds, none of a 1-bit palette.
+const unset_entries = [_][]const u8{
     "tests/images/bmp/images/Core_1_Bit.bmp",
     "tests/images/bmp/images/Core_4_Bit.bmp",
     "tests/images/bmp/images/Core_8_Bit.bmp",
@@ -21,8 +22,8 @@ const refused = [_][]const u8{
     "tests/images/bmp/images/pal8os2sp.bmp",
 };
 
-fn isRefused(name: []const u8) bool {
-    for (refused) |entry| {
+fn namesUnsetEntries(name: []const u8) bool {
+    for (unset_entries) |entry| {
         if (std.mem.eql(u8, entry, name)) return true;
     }
     return false;
@@ -49,7 +50,7 @@ test "every BMP test file decodes as in the original" {
     try std.testing.expect(set.entries.len > 60);
     var failures: usize = 0;
     for (set.entries) |entry| {
-        const expect: oracle.Expect = if (isRefused(entry.name)) .port_refuses else .same;
+        const expect: oracle.Expect = if (namesUnsetEntries(entry.name)) .same_size else .same;
         oracle.expectAll(gpa, entry.bytes, .{ .name = entry.name }, expect) catch {
             failures += 1;
         };
@@ -57,17 +58,162 @@ test "every BMP test file decodes as in the original" {
     try std.testing.expectEqual(0, failures);
 }
 
-test "the BMP test files the port refuses name entries past their palette" {
+/// An uncompressed palette BMP as read from its bytes by this test, apart
+/// from the port: the palette entries the original reads, and each pixel's
+/// index, top row first.
+const PaletteImage = struct {
+    width: u32,
+    height: u32,
+    palette: [256][3]u8,
+    /// The entries the original reads; it reads the others from
+    /// uninitialized stack memory.
+    entries: u32,
+    indices: []u8,
+
+    fn read(bytes: []const u8) !PaletteImage {
+        const offset = std.mem.readInt(u32, bytes[10..14], .little);
+        const header_size = std.mem.readInt(u32, bytes[14..18], .little);
+        var image: PaletteImage = undefined;
+        var stored_height: i32 = undefined;
+        var bpp: u32 = undefined;
+        if (header_size == 12) {
+            image.width = std.mem.readInt(u16, bytes[18..20], .little);
+            stored_height = std.mem.readInt(u16, bytes[20..22], .little);
+            bpp = std.mem.readInt(u16, bytes[24..26], .little);
+        } else {
+            image.width = std.mem.readInt(u32, bytes[18..22], .little);
+            stored_height = std.mem.readInt(i32, bytes[22..26], .little);
+            bpp = std.mem.readInt(u16, bytes[28..30], .little);
+            try std.testing.expectEqual(0, std.mem.readInt(u32, bytes[30..34], .little));
+        }
+        image.height = @abs(stored_height);
+        // The original's palette size, which counts an OS/2 header as 24
+        // bytes, not 12.
+        const count: i64 = if (header_size == 12)
+            @divTrunc(@as(i64, offset) - 14 - 24, 3)
+        else
+            (@as(i64, offset) - 14 - header_size) >> 2;
+        image.entries = @intCast(std.math.clamp(count, 0, 256));
+        const entry_size: usize = if (header_size == 12) 3 else 4;
+        for (0..image.entries) |i| {
+            const entry = bytes[14 + header_size + i * entry_size ..][0..3];
+            image.palette[i] = .{ entry[2], entry[1], entry[0] };
+        }
+        const row_bytes = (@as(usize, image.width) * bpp + 31) / 32 * 4;
+        try std.testing.expect(offset + row_bytes * image.height <= bytes.len);
+        image.indices = try gpa.alloc(u8, @as(usize, image.width) * image.height);
+        for (0..image.height) |y| {
+            const stored_row = if (stored_height > 0) image.height - 1 - y else y;
+            const row = bytes[offset + stored_row * row_bytes ..][0..row_bytes];
+            for (0..image.width) |x| {
+                const bit = x * bpp;
+                const byte = row[bit / 8];
+                const shift: u3 = @intCast(8 - bpp - bit % 8);
+                const field_max = (@as(u32, 1) << @intCast(bpp)) - 1;
+                image.indices[y * image.width + x] = @intCast((byte >> shift) & field_max);
+            }
+        }
+        return image;
+    }
+
+    fn deinit(image: PaletteImage) void {
+        gpa.free(image.indices);
+    }
+
+    /// The index of output pixel `i`, the rows flipped or not.
+    fn index(image: PaletteImage, i: usize, flip: bool) u8 {
+        if (!flip) return image.indices[i];
+        const y = i / image.width;
+        const x = i % image.width;
+        return image.indices[(image.height - 1 - y) * image.width + x];
+    }
+};
+
+test "the BMP test files naming unset palette entries read them as zero" {
     var set = try corpusFiles();
     defer set.deinit(gpa);
     var found: usize = 0;
     for (set.entries) |entry| {
-        if (!isRefused(entry.name)) continue;
+        if (!namesUnsetEntries(entry.name)) continue;
         found += 1;
-        const result = stbi.loadFromMemory(u8, gpa, entry.bytes, .{});
-        try std.testing.expectError(error.BmpPaletteIndex, result);
+        const image = try PaletteImage.read(entry.bytes);
+        defer image.deinit();
+        var past: usize = 0;
+        for (image.indices) |i| past += @intFromBool(i >= image.entries);
+        try std.testing.expect(past > 0);
+
+        // The port gives each read entry's colour and zero for the others,
+        // opaque at four components.
+        for ([_]stbi.Components{ .file, .rgb, .rgba }) |components| {
+            for ([_]bool{ false, true }) |flip| {
+                var loaded = try stbi.loadFromMemory(u8, gpa, entry.bytes, .{
+                    .components = components,
+                    .flip_vertically = flip,
+                });
+                defer loaded.deinit(gpa);
+                const n = loaded.channels;
+                for (0..image.indices.len) |i| {
+                    const index = image.index(i, flip);
+                    const read = index < image.entries;
+                    const colour: [3]u8 = if (read) image.palette[index] else @splat(0);
+                    const pixel = loaded.pixels[i * n ..][0..n];
+                    try std.testing.expectEqualSlices(u8, &colour, pixel[0..3]);
+                    if (n == 4) try std.testing.expectEqual(255, pixel[3]);
+                }
+            }
+        }
+
+        // Every pixel whose entry the original reads is the original's.
+        if (fuzz_options.sanitize) continue;
+        for (0..5) |comp| {
+            for ([_]bool{ false, true }) |flip| {
+                const request: oracle.Request = .{ .options = .{
+                    .components = @fromBackingInt(@as(u3, @intCast(comp))),
+                    .flip_vertically = flip,
+                } };
+                try expectReadEntriesSame(entry.bytes, request, image);
+            }
+        }
     }
-    try std.testing.expectEqual(refused.len, found);
+    try std.testing.expectEqual(unset_entries.len, found);
+}
+
+/// Compares the port's 8-bit load with both builds of the original at the
+/// pixels whose palette entry the original reads.
+fn expectReadEntriesSame(bytes: []const u8, request: oracle.Request, image: PaletteImage) !void {
+    var ours = try stbi.loadFromMemory(u8, gpa, bytes, request.options);
+    defer ours.deinit(gpa);
+    const n = ours.channels;
+    const settings = request.settings();
+    for ([_]oracle.Path{ .simd, .scalar }) |path| {
+        var theirs: oracle.Result = undefined;
+        oracle.loadFn(path)(bytes.ptr, bytes.len, 8, &settings, &theirs);
+        defer oracle.freeFn(path)(theirs.pixels);
+        try std.testing.expect(theirs.pixels != null);
+        try std.testing.expectEqual(@as(c_int, @intCast(ours.width)), theirs.x);
+        try std.testing.expectEqual(@as(c_int, @intCast(ours.height)), theirs.y);
+        const original: [*]const u8 = @ptrCast(theirs.pixels.?);
+        for (0..image.indices.len) |i| {
+            if (image.index(i, request.options.flip_vertically) >= image.entries) continue;
+            const pixel = ours.pixels[i * n ..][0..n];
+            try std.testing.expectEqualSlices(u8, original[i * n ..][0..n], pixel);
+        }
+    }
+}
+
+/// Checks that every pixel of `bytes` loads as zero, opaque at four
+/// components.
+fn expectZeroPixels(bytes: []const u8) !void {
+    for ([_]stbi.Components{ .rgb, .rgba }) |components| {
+        var image = try stbi.loadFromMemory(u8, gpa, bytes, .{ .components = components });
+        defer image.deinit(gpa);
+        const n = image.channels;
+        for (0..image.pixels.len / n) |i| {
+            const pixel = image.pixels[i * n ..][0..n];
+            try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0 }, pixel[0..3]);
+            if (n == 4) try std.testing.expectEqual(255, pixel[3]);
+        }
+    }
 }
 
 // --------------------------------------------------------
@@ -332,7 +478,7 @@ test "palette sizes from none to past 256 decode or fail as in the original" {
     }
 }
 
-test "a pixel naming an entry past the palette is refused, where the original reads stack memory" {
+test "a pixel naming an entry past the palette reads as zero" {
     var prng: std.Random.DefaultPrng = .init(0xb3b0_0005);
     const rng = prng.random();
     const cases = [_]struct { header_size: u32, bpp: u16, entries: u32 }{
@@ -357,9 +503,8 @@ test "a pixel naming an entry past the palette is refused, where the original re
             .pixels = pixels,
         }, rng);
         defer gpa.free(bytes);
-        try oracle.expectAll(gpa, bytes, .{ .name = "index past palette" }, .port_refuses);
-        const result = stbi.loadFromMemory(u8, gpa, bytes, .{});
-        try std.testing.expectError(error.BmpPaletteIndex, result);
+        try oracle.expectAll(gpa, bytes, .{ .name = "index past palette" }, .same_size);
+        try expectZeroPixels(bytes);
     }
 }
 
@@ -456,8 +601,12 @@ test "bad compressions, planes, offsets and depths fail as in the original" {
     for (cases.items) |b| {
         const bytes = try encodeBmp(b, rng);
         defer gpa.free(bytes);
-        const expect: oracle.Expect = if (readsPastPalette(b)) .port_refuses else .same;
-        try oracle.expectAll(gpa, bytes, .{ .name = "bad header" }, expect);
+        if (readsPastPalette(b)) {
+            try oracle.expectAll(gpa, bytes, .{ .name = "bad header" }, .same_size);
+            try expectZeroPixels(bytes);
+        } else {
+            try oracle.expectAll(gpa, bytes, .{ .name = "bad header" }, .same);
+        }
     }
 }
 
@@ -586,7 +735,7 @@ const fuzz_config: fuzz.Config = .{
     .name = "bmp",
     .seed = 0xb3b0_f000,
     .cases = 3000,
-    .unsafe = &bmp_unsafe,
+    .unset_pixels = &bmp_unset_pixels,
 };
 
 test "fuzz: mutated BMPs decode or fail as in the original" {
@@ -601,25 +750,25 @@ test "fuzz: mutated BMPs decode or fail as in the original" {
     try handMadeSeeds(&hand_made, prng.random());
     var inputs: std.ArrayList([]const u8) = .empty;
     defer inputs.deinit(gpa);
-    // The refused files would give refused cases only.
+    // The files naming unset palette entries are left out: most of their
+    // cases could not be compared.
     for (set.entries) |entry| {
-        if (!isRefused(entry.name)) try inputs.append(gpa, entry.bytes);
+        if (!namesUnsetEntries(entry.name)) try inputs.append(gpa, entry.bytes);
     }
     try inputs.appendSlice(gpa, hand_made.items);
     try fuzz.run(gpa, fuzz_config, inputs.items);
-    try fuzz.expectUnsafeRefused(gpa, fuzz_config, inputs.items, &.{error.BmpPaletteIndex});
 }
 
 /// Fuzz cases on which the original reads palette entries it never wrote,
 /// found by running every case against it.
-const bmp_unsafe = fuzz.unsafeLoads(&.{
+const bmp_unset_pixels = [_]u32{
     102,  205,  245,  287,  293,  302,  313,  318,  326,  352,  437,  486,
     488,  527,  729,  733,  792,  825,  849,  941,  1033, 1161, 1261, 1265,
     1346, 1425, 1541, 1571, 1600, 1614, 1702, 1734, 1824, 1960, 1973, 2011,
     2014, 2040, 2066, 2077, 2133, 2148, 2170, 2203, 2219, 2244, 2247, 2293,
     2383, 2396, 2414, 2524, 2599, 2629, 2630, 2670, 2702, 2727, 2763, 2893,
     2927,
-});
+};
 
 fn decodeAll(allocator: std.mem.Allocator, bytes: []const u8) !void {
     for ([_]stbi.Components{ .file, .grey, .rgba }) |components| {

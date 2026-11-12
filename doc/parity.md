@@ -2,7 +2,9 @@
 
 The port gives the original's result on every input the original handles
 safely. Where the original reads out of bounds, reads uninitialized memory,
-frees twice or is otherwise undefined, the port returns an error instead.
+frees twice or is otherwise undefined, the port returns an error instead,
+except for a BMP palette entry the original never read, which the port
+reads as zero.
 Each such case has a test, and the fuzz tests list the cases they generate
 in their `.unsafe` lists (`test/<format>_unsafe.zig`). The author has
 approved each case.
@@ -174,17 +176,26 @@ doubles`, `… on special values` (`test/pow_test.zig`).
 
 - **A pixel naming a palette entry past the palette.** The original keeps
   the palette in a 256-entry stack array and reads an entry it never filled,
-  so the pixel gets whatever was on the stack. The port fails with
-  `error.BmpPaletteIndex`. Tests: "a pixel naming an entry past the palette
-  is refused, where the original reads stack memory", "the BMP test files the
-  port refuses name entries past their palette".
+  so the pixel gets whatever was on the stack. The port reads such an entry
+  as zero: black, and opaque when four components are asked for, as every
+  palette pixel is. Tests: "a pixel naming an entry past the palette reads
+  as zero" and "bad compressions, planes, offsets and depths fail as in the
+  original" check the port's zeros and compare its size and channels with
+  the original's; the fuzz test's `bmp_unset_pixels` cases must decode to
+  the original's size and channels, their pixels not compared.
 - **OS/2 (12-byte header) palettes.** A special case of the above that real
   files hit: the original counts the OS/2 header as 24 bytes when it works
   out the palette size, so it reads four entries fewer than the file holds,
-  and none at all from a 1-bit file. Any pixel using one of the last four
-  entries is refused. In bmpsuite and image-rs this refuses `Core_1_Bit.bmp`,
-  `Core_4_Bit.bmp`, `Core_8_Bit.bmp` and `pal8os2sp.bmp`; `pal8badindex.bmp`
-  is refused for an index past an ordinary palette. Same tests.
+  and none at all from a 1-bit file. A pixel using one of the last four
+  entries reads as zero in the port. In bmpsuite and image-rs these are
+  `Core_1_Bit.bmp`, `Core_4_Bit.bmp`, `Core_8_Bit.bmp` and `pal8os2sp.bmp`;
+  `pal8badindex.bmp` names an entry past an ordinary palette. Test: "the BMP
+  test files naming unset palette entries read them as zero" reads each
+  file's palette and indices itself and expects the original's entry for
+  each index the original reads and zero for the others, and compares with
+  both builds of the original every pixel whose entry the original reads;
+  "every BMP test file decodes as in the original" compares their sizes and
+  channels.
 - **A height of -2^31.** The original takes `abs()` of the stored height,
   which is undefined for the most negative `int`. The port fails with
   `error.DimensionTooLarge`, which is what the original reports in practice.

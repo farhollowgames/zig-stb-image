@@ -358,7 +358,9 @@ fn decodePalette(
     const height: u64 = source.img_y;
     // A negative palette size reads no entries.
     const entries: u32 = @intCast(@max(palette_len, 0));
-    var palette: [256][4]u8 = undefined;
+    // The original reads an entry it never filled from uninitialized stack
+    // memory; the port reads it as zero.
+    var palette: [256][4]u8 = @splat(@splat(0));
     for (palette[0..entries]) |*entry| {
         entry[2] = source.get8();
         entry[1] = source.get8();
@@ -382,7 +384,7 @@ fn decodePalette(
             var v = source.get8();
             for (0..width) |i| {
                 const color = (v >> bit_offset) & 1;
-                try putEntry(source, &palette, entries, color, target, out, &z);
+                putEntry(&palette, color, target, out, &z);
                 if (i + 1 == width) break;
                 if (bit_offset == 0) {
                     bit_offset = 7;
@@ -401,29 +403,18 @@ fn decodePalette(
                     v2 = v & 15;
                     v >>= 4;
                 }
-                try putEntry(source, &palette, entries, v, target, out, &z);
+                putEntry(&palette, v, target, out, &z);
                 if (i + 1 == width) break;
                 v = if (header.bpp == 8) source.get8() else v2;
-                try putEntry(source, &palette, entries, v, target, out, &z);
+                putEntry(&palette, v, target, out, &z);
             }
             source.skip(pad);
         }
     }
 }
 
-/// Writes palette entry `index` as one pixel of `target` components. The
-/// original reads an entry past the palette from uninitialized stack
-/// memory; the port refuses such an index.
-inline fn putEntry(
-    source: *Source,
-    palette: *const [256][4]u8,
-    entries: u32,
-    index: u8,
-    target: u3,
-    out: []u8,
-    z: *usize,
-) Error!void {
-    if (index >= entries) return source.fail(error.BmpPaletteIndex);
+/// Writes palette entry `index` as one pixel of `target` components.
+inline fn putEntry(palette: *const [256][4]u8, index: u8, target: u3, out: []u8, z: *usize) void {
     const entry = palette[index];
     out[z.*..][0..3].* = entry[0..3].*;
     z.* += 3;

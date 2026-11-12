@@ -160,9 +160,6 @@ pub const Error = error{
     /// stb_image failed without setting any reason: `stbi_failure_reason`
     /// returns NULL.
     NoReason,
-    /// A BMP pixel names a palette entry past the palette, which stb_image
-    /// reads from uninitialized memory; the port refuses the image.
-    BmpPaletteIndex,
     /// A raw TGA's pixel rows end early; stb_image leaves the missing rows
     /// uninitialized, and the port refuses the image.
     TgaTruncated,
@@ -361,7 +358,6 @@ fn strings(err: Error) [2][]const u8 {
             "PNG not supported: unknown PNG chunk type",
         },
         error.NoReason => .{ "", "" },
-        error.BmpPaletteIndex => .{ "bad palette index", "Corrupt BMP" },
         error.TgaTruncated => .{ "truncated", "Corrupt TGA" },
         error.PsdMatteOutOfRange => .{ "bad matte", "Corrupt PSD" },
         error.ReadFailed => .{ "read failed", "The reader failed" },
