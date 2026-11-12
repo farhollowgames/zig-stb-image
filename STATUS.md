@@ -27,12 +27,16 @@ picks it up; the git log has the detail.
   (empty) and `src/pow.zig` (std's `pow`, not the C library's).
 - **Next:** the decoders, each with its oracle tests:
   zlib and PNG; JPEG; the other seven formats and `pow`. Then the
-  sanitizer run of the original (`zig build sanitize`), the benchmark, the
-  docs, and steps 5 to 7 of the methodology.
+  benchmark, the docs, and steps 5 to 7 of the methodology.
 - **Builds:** one at a time, under the memory cap, as
   `timeout 3000 systemd-run --user --scope -q -p MemoryMax=6G zig build <step> -j3`.
-- **Pushing:** not pushed: remote missing (`git ls-remote origin` fails; the
-  GitHub repository does not exist yet).
+- **Sanitizer run:** `zig build sanitize` runs every test's calls to the
+  original through a build of it with AddressSanitizer and
+  UndefinedBehaviorSanitizer (system clang) and lists the flagged calls in
+  `zig-out/sanitize/report.txt`.
+- **Branches:** the decoders are written on `port/png`, `port/jpeg`,
+  `port/bmp-tga-psd-pnm` and `port/gif-hdr-pic` (worktrees under
+  `~/Projects/zig-stb-image.wt/`), merged into `main` when their tests pass.
 
 ## Formats
 
