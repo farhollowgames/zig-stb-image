@@ -170,3 +170,59 @@ test "settings: a load with a thread's own settings flips and converts as the or
     thread.join();
     try result;
 }
+
+/// An 8 x 4 flat HDR file: 4 bytes of RGBE a pixel.
+fn hdrFile(arena: std.mem.Allocator) ![]u8 {
+    const header = "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 4 +X 8\n";
+    const bytes = try arena.alloc(u8, header.len + 8 * 4 * 4);
+    @memcpy(bytes[0..header.len], header);
+    for (bytes[header.len..], 0..) |*b, i| b.* = @truncate(i * 37 + 100);
+    return bytes;
+}
+
+/// Loads `png` as floats and `hdr` as 8 and 16 bits with the settings this
+/// thread sees, against the original with the same gammas and scales.
+fn expectLoadsWithSettings(png: []const u8, hdr: []const u8) !void {
+    const options = settings.current();
+    try oracle.expectLoadSame(gpa, png, .{ .bits = .f32, .options = options }, .{ .name = "gamma png" }, .same);
+    for ([_]oracle.Bits{ .u8, .u16 }) |bits| {
+        try oracle.expectLoadSame(gpa, hdr, .{ .bits = bits, .options = options }, .{ .name = "gamma hdr" }, .same);
+    }
+}
+
+fn loadsWithSettingsOnThread(png: []const u8, hdr: []const u8, result: *anyerror!void) void {
+    result.* = expectLoadsWithSettings(png, hdr);
+}
+
+test "settings: the gamma and scale setters apply to loads on every thread as in the original" {
+    defer {
+        settings.setLdrToHdrGamma(2.2);
+        settings.setLdrToHdrScale(1.0);
+        settings.setHdrToLdrGamma(2.2);
+        settings.setHdrToLdrScale(1.0);
+    }
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var prng: std.Random.DefaultPrng = .init(0x6a);
+    const png = try png_file.random(arena, prng.random(), .{ .width = 7, .height = 3, .color = 2 }, .{});
+    const hdr = try hdrFile(arena);
+
+    settings.setLdrToHdrGamma(1.7);
+    settings.setLdrToHdrScale(3.5);
+    settings.setHdrToLdrGamma(0.8);
+    settings.setHdrToLdrScale(0.3);
+    const options = settings.current();
+    try std.testing.expectEqual(1.7, options.ldr_to_hdr_gamma);
+    try std.testing.expectEqual(3.5, options.ldr_to_hdr_scale);
+    try std.testing.expectEqual(0.8, options.hdr_to_ldr_gamma);
+    try std.testing.expectEqual(0.3, options.hdr_to_ldr_scale);
+    try expectLoadsWithSettings(png, hdr);
+
+    // The original has no per-thread gammas or scales: another thread sees
+    // the process-wide ones.
+    var result: anyerror!void = {};
+    const thread = try std.Thread.spawn(.{}, loadsWithSettingsOnThread, .{ png, hdr, &result });
+    thread.join();
+    try result;
+}

@@ -10,10 +10,10 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // The formats to decode, as stb_image's STBI_NO_* and STBI_ONLY_*.
-    const format_options = b.addOptions();
+    var enabled_formats: std.EnumSet(Format) = .empty;
     inline for (@typeInfo(Format).@"enum".field_names) |name| {
         const enabled = b.option(bool, name, "Decode " ++ name ++ " (default true)") orelse true;
-        format_options.addOption(bool, name, enabled);
+        enabled_formats.setPresent(@field(Format, name), enabled);
     }
     // The original builds its SSE2 IDCT for x86-64 and its scalar one for
     // targets without SSE2.
@@ -23,8 +23,7 @@ pub fn build(b: *std.Build) void {
         "The JPEG IDCT whose samples to give where the original's builds differ " ++
             "(default sse2 on x86-64, else scalar)",
     ) orelse if (target.result.cpu.arch == .x86_64) JpegIdct.sse2 else .scalar;
-    format_options.addOption(JpegIdct, "jpeg_idct", jpeg_idct);
-    const format_module = format_options.createModule();
+    const format_module = optionsModule(b, enabled_formats, jpeg_idct);
 
     const stb_image = b.addModule("stb_image", .{
         .root_source_file = b.path("src/stb_image.zig"),
@@ -86,6 +85,35 @@ pub fn build(b: *std.Build) void {
     differential.root_module.linkLibrary(oracleLibrary(b, target, .simd));
     differential.root_module.linkLibrary(oracleLibrary(b, target, .scalar));
     test_step.dependOn(&b.addRunArtifact(differential).step);
+
+    // The format switches: two builds of the port, which leave out each
+    // format once and build it in once.
+    const odd: std.EnumSet(Format) = .initMany(&.{ .jpeg, .bmp, .gif, .pic, .pnm });
+    for ([_]std.EnumSet(Format){ odd, odd.complement() }) |left_out| {
+        const port = b.createModule(.{
+            .root_source_file = b.path("src/stb_image.zig"),
+            .target = target,
+            .optimize = test_optimize,
+            .imports = &.{.{
+                .name = "stb_image_options",
+                .module = optionsModule(b, left_out.complement(), jpeg_idct),
+            }},
+        });
+        const formats_test = b.addTest(.{
+            .name = "formats",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/formats_test.zig"),
+                .target = target,
+                .optimize = test_optimize,
+                .imports = &.{
+                    .{ .name = "stb_image", .module = port },
+                    .{ .name = "corpus_paths", .module = corpus_module },
+                },
+            }),
+            .filters = test_filters,
+        });
+        test_step.dependOn(&b.addRunArtifact(formats_test).step);
+    }
 
     addSanitize(b, target, test_optimize, test_module, corpus_module, .{
         .filters = test_filters,
@@ -244,6 +272,16 @@ fn addSanitize(
         .install_subdir = "sanitize",
     });
     step.dependOn(&install.step);
+}
+
+/// The `stb_image_options` module: the formats built in, and the IDCT.
+fn optionsModule(b: *std.Build, formats: std.EnumSet(Format), jpeg_idct: JpegIdct) *std.Build.Module {
+    const options = b.addOptions();
+    inline for (@typeInfo(Format).@"enum".field_names) |name| {
+        options.addOption(bool, name, formats.contains(@field(Format, name)));
+    }
+    options.addOption(JpegIdct, "jpeg_idct", jpeg_idct);
+    return options.createModule();
 }
 
 const corpora = [_][]const u8{ "stb", "jpeg_decoder", "image_rs", "psd_tools", "libjpeg_turbo" };

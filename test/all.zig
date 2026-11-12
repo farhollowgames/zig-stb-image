@@ -8,6 +8,7 @@ const oracle = @import("oracle.zig");
 test {
     _ = @import("core_test.zig");
     _ = @import("file_test.zig");
+    _ = @import("limits_test.zig");
     _ = @import("zlib_test.zig");
     _ = @import("png_test.zig");
     _ = @import("settings_test.zig");

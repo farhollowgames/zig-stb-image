@@ -125,7 +125,15 @@ test that fails before the fix where there was a bug. One commit each.
    (against `stbi_load`, `stbi_load_16`, `stbi_loadf`), from a file through
    a reader that cannot seek (results compared, not the position), and
    runs the three queries by path and on such a reader.
-2. **Untested claims:** not started.
+2. **Untested claims: done.** New tests, which passed at once (no bug):
+   "settings: the gamma and scale setters apply to loads on every thread
+   as in the original"; "Limits.bytes_max: BMP, TGA, PSD and PNM past the
+   limit fail as the original past INT_MAX" and "… a conversion to more
+   components is checked against the limit" (`test/limits_test.zig`);
+   "formats: a format left out of the build fails as an unknown image
+   type, the others load" (`test/formats_test.zig`), which `zig build
+   test` runs on two builds of the port that leave out each format once
+   and build it in once.
 3. **`Limits.bytes_max` and memory:** not started.
 4. **Comparison holes:** not started.
 5. **Hidden invariants in fast paths:** not started.
@@ -240,7 +248,7 @@ The full test run passes (162 tests).
 | `stbi_set_flip_vertically_on_load`, `…_thread` | `Options.flip_vertically`; `settings.setFlipVerticallyOnLoad`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
 | `stbi_set_unpremultiply_on_load`, `…_thread` | `Options.unpremultiply`; `settings.setUnpremultiplyOnLoad`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
 | `stbi_convert_iphone_png_to_rgb`, `…_thread` | `Options.convert_iphone_png`; `settings.convertIphonePngToRgb`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
-| `stbi_hdr_to_ldr_gamma`, `stbi_hdr_to_ldr_scale` | `Options.hdr_to_ldr_gamma`, `…_scale`; `settings.setHdrToLdrGamma`, `…Scale` | fuzz cases at random gammas and scales; "hdr: …" gamma and scale tests | oracle-tested |
+| `stbi_hdr_to_ldr_gamma`, `stbi_hdr_to_ldr_scale` | `Options.hdr_to_ldr_gamma`, `…_scale`; `settings.setHdrToLdrGamma`, `…Scale` | fuzz cases at random gammas and scales; "hdr: …" gamma and scale tests; "settings: the gamma and scale setters apply to loads on every thread …" | oracle-tested |
 | `stbi_ldr_to_hdr_gamma`, `stbi_ldr_to_hdr_scale` | `Options.ldr_to_hdr_gamma`, `…_scale`; `settings.setLdrToHdrGamma`, `…Scale` | as above | oracle-tested |
 | `stbi_failure_reason` | the returned `Error`; `failureReason(err)` | every failing load compares it | oracle-tested |
 | `stbi_image_free` | `Image.deinit`, `Animation.deinit` | every test runs on `std.testing.allocator` | oracle-tested |
@@ -250,7 +258,7 @@ The full test run passes (162 tests).
 
 | upstream | zig-stb-image | state |
 | --- | --- | --- |
-| `STBI_NO_JPEG` … `STBI_NO_PNM`, `STBI_ONLY_JPEG` … `STBI_ONLY_PNM` | `-Djpeg=false` and so on: a format left out is never detected | ported |
+| `STBI_NO_JPEG` … `STBI_NO_PNM`, `STBI_ONLY_JPEG` … `STBI_ONLY_PNM` | `-Djpeg=false` and so on: a format left out is never detected | tested: "formats: …" on two builds that leave out each format once |
 | `STBI_MAX_DIMENSIONS` | `Options.limits.dimension_max` | ported |
 | `STBI_FAILURE_USERMSG` | `failureMessage(err)` | ported |
 | `STBI_NO_FAILURE_STRINGS` | none: the strings are compiled only where `failureReason` or `failureMessage` is called | left out (approved) |
