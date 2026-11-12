@@ -45,24 +45,24 @@ fn expectCorpus(root: corpus.Root, sub_dir: []const u8) !usize {
     return set.entries.len;
 }
 
-test "the jpeg-decoder test images decode as in the original" {
+test "jpeg: the jpeg-decoder test images decode as in the original" {
     // reftest (with mozilla/ and lossless/), crashtest (with
     // imagetestsuite/) and icc.
     const count = try expectCorpus(.jpeg_decoder, "tests");
     try std.testing.expect(count >= 150);
 }
 
-test "the libjpeg-turbo test images decode as in the original" {
+test "jpeg: the libjpeg-turbo test images decode as in the original" {
     const count = try expectCorpus(.libjpeg_turbo, "testimages");
     try std.testing.expect(count >= 4);
 }
 
-test "the image-rs JPEG test images decode as in the original" {
+test "jpeg: the image-rs JPEG test images decode as in the original" {
     try std.testing.expect(try expectCorpus(.image_rs, "tests/images/jpg") >= 6);
     try std.testing.expect(try expectCorpus(.image_rs, "tests/regression/jpg") >= 1);
 }
 
-test "arithmetic-coded and 12-bit JPEGs are refused for the original's reasons" {
+test "jpeg: arithmetic-coded and 12-bit JPEGs are refused for the original's reasons" {
     var set = try corpus.load(gpa, std.testing.io, .libjpeg_turbo, "testimages", &.{".jpg"});
     defer set.deinit(gpa);
     var checked: u32 = 0;
@@ -188,7 +188,7 @@ const ac_full_values = blk: {
     break :blk values;
 };
 
-test "the encoder's Huffman tables are complete prefix codes" {
+test "jpeg: the encoder's Huffman tables are complete prefix codes" {
     for ([_]HuffmanSpec{ dc_standard, ac_standard, dc_full, ac_full }) |spec| {
         var total: usize = 0;
         var kraft: f64 = 0;
@@ -689,7 +689,7 @@ fn findMarkerFrom(bytes: []const u8, start: usize, marker: u8) usize {
     unreachable;
 }
 
-test "1x1 images decode as in the original" {
+test "jpeg: 1x1 images decode as in the original" {
     try expectImage(.{ .width = 1, .height = 1 }, "1x1 grey");
     try expectImage(.{ .width = 1, .height = 1, .components = &ycbcr_420 }, "1x1 4:2:0");
     try expectImage(.{ .width = 1, .height = 1, .frame = .progressive }, "1x1 progressive");
@@ -706,7 +706,7 @@ fn ratioValid(a: u4, b: u4) bool {
     return max % a == 0 and max % b == 0;
 }
 
-test "every sampling factor combination the original accepts decodes as in the original" {
+test "jpeg: every sampling factor combination the original accepts decodes as in the original" {
     var count: u32 = 0;
     for (1..5) |yh| for (1..5) |yv| for (1..5) |ch| for (1..5) |cv| {
         const y: Component = .{ .id = 1, .h = @intCast(yh), .v = @intCast(yv) };
@@ -747,7 +747,7 @@ test "every sampling factor combination the original accepts decodes as in the o
     };
 }
 
-test "sampling factors with a fractional ratio are refused as in the original" {
+test "jpeg: sampling factors with a fractional ratio are refused as in the original" {
     var count: u32 = 0;
     for (1..5) |yh| for (1..5) |yv| for (1..5) |ch| for (1..5) |cv| {
         const y: Component = .{ .id = 1, .h = @intCast(yh), .v = @intCast(yv) };
@@ -773,7 +773,7 @@ test "sampling factors with a fractional ratio are refused as in the original" {
     try std.testing.expectEqual(256 - 144, count);
 }
 
-test "sizes that are not whole blocks or MCUs decode as in the original" {
+test "jpeg: sizes that are not whole blocks or MCUs decode as in the original" {
     for ([_]u16{ 1, 2, 7, 8, 9, 15, 16, 17, 31, 33 }) |width| {
         for ([_]u16{ 1, 7, 9, 16, 17 }) |height| {
             try expectImage(.{
@@ -810,7 +810,7 @@ const four_subsampled = [_]Component{
     .{ .id = 4, .h = 2, .v = 2 },
 };
 
-test "every colour model decodes as in the original" {
+test "jpeg: every colour model decodes as in the original" {
     // JFIF YCbCr, and YCbCr with neither JFIF nor Adobe segments.
     try expectImage(.{ .width = 21, .height = 13, .components = &three }, "JFIF YCbCr");
     try expectImage(.{
@@ -866,7 +866,7 @@ test "every colour model decodes as in the original" {
     }, "progressive CMYK");
 }
 
-test "the frame types and table variants decode as in the original" {
+test "jpeg: the frame types and table variants decode as in the original" {
     for ([_]Frame{ .baseline, .extended, .progressive }) |frame| {
         for ([_]bool{ false, true }) |standard_tables| {
             if (frame == .progressive and standard_tables) continue; // no end-of-band runs
@@ -895,7 +895,7 @@ test "the frame types and table variants decode as in the original" {
     }, "progressive 4:4:4");
 }
 
-test "restart intervals and every restart marker decode as in the original" {
+test "jpeg: restart intervals and every restart marker decode as in the original" {
     for ([_]u16{ 1, 2, 7, 9 }) |interval| {
         for ([_]bool{ true, false }) |interleaved| {
             try expectImage(.{
@@ -916,7 +916,7 @@ test "restart intervals and every restart marker decode as in the original" {
     }
 }
 
-test "a restart interval without its markers stops the scan, and the port refuses the rest" {
+test "jpeg: a restart interval without its markers stops the scan, and the port refuses the rest" {
     const bytes = try encode(.{
         .width = 80,
         .height = 48,
@@ -928,7 +928,7 @@ test "a restart interval without its markers stops the scan, and the port refuse
     try expectRefused(bytes, error.JpegMissingScanData, "restart markers missing");
 }
 
-test "a DNL segment decodes as in the original, and a wrong one fails as there" {
+test "jpeg: a DNL segment decodes as in the original, and a wrong one fails as there" {
     try expectImage(.{ .width = 30, .height = 20, .components = &ycbcr_420, .dnl = 20 }, "DNL");
     try expectImage(.{
         .width = 30,
@@ -951,13 +951,13 @@ test "a DNL segment decodes as in the original, and a wrong one fails as there" 
     try expectRefused(wrong, error.BadDnlLength, "DNL length");
 }
 
-test "the largest dimensions decode as in the original" {
+test "jpeg: the largest dimensions decode as in the original" {
     try expectImage(.{ .width = 65535, .height = 1 }, "65535 wide");
     try expectImage(.{ .width = 1, .height = 65535 }, "65535 high");
     try expectImage(.{ .width = 65535, .height = 3, .components = &ycbcr_420 }, "65535 wide 4:2:0");
 }
 
-test "the limits options refuse what is past them" {
+test "jpeg: the limits options refuse what is past them" {
     const bytes = try encode(.{ .width = 101, .height = 50 });
     defer gpa.free(bytes);
     try std.testing.expectError(error.DimensionTooLarge, stbi.loadFromMemory(u8, gpa, bytes, .{
@@ -970,7 +970,7 @@ test "the limits options refuse what is past them" {
     }));
 }
 
-test "a flat image decodes to its colour" {
+test "jpeg: a flat image decodes to its colour" {
     var fill: Block = @splat(0);
     fill[0] = 80; // (80 * 1) / 8 + 128 = 138
     const bytes = try encode(.{ .width = 9, .height = 9, .quant = .one, .fill = fill });
@@ -982,7 +982,7 @@ test "a flat image decodes to its colour" {
 
 // ---- The IDCT -------------------------------------------------------------
 
-test "coefficients past 16 bits give the samples of the original build the port follows" {
+test "jpeg: coefficients past 16 bits give the samples of the original build the port follows" {
     // The SSE2 IDCT wraps sums of two coefficients to 16 bits where the
     // scalar one keeps them whole.
     var fill: Block = @splat(0);
@@ -994,7 +994,7 @@ test "coefficients past 16 bits give the samples of the original build the port 
     try expectImage(.{ .width = 8, .height = 8, .quant = .one, .fill = fill }, "builds disagree");
 }
 
-test "coefficients that overflow the original's scalar IDCT are refused by the scalar port" {
+test "jpeg: coefficients that overflow the original's scalar IDCT are refused by the scalar port" {
     const image: Image = .{ .width = 8, .height = 8, .quant = .one, .fill = @splat(32767) };
     switch (stbi.jpeg_idct) {
         .scalar => {
@@ -1050,7 +1050,7 @@ fn inserted(bytes: []const u8, at: usize, extra: []const u8) ![]u8 {
     return out;
 }
 
-test "faults in the frame header fail as in the original" {
+test "jpeg: faults in the frame header fail as in the original" {
     const grey_16: Image = .{};
     const p = struct {
         fn at(offset: usize, value: u8) [1]Patch {
@@ -1076,7 +1076,7 @@ test "faults in the frame header fail as in the original" {
     try expectFault(grey_16, 0xc0, &p(1, 0xcd), error.UnknownJpegMarker, "arithmetic progressive");
 }
 
-test "faults in the tables fail as in the original" {
+test "jpeg: faults in the tables fail as in the original" {
     const p = struct {
         fn at(offset: usize, value: u8) [1]Patch {
             return .{.{ .offset = offset, .value = value }};
@@ -1115,7 +1115,7 @@ test "faults in the tables fail as in the original" {
     try expectFault(.{}, 0xe0, &p(2, 0x7f), null, "APP length past the end");
 }
 
-test "markers, fill bytes and junk between segments load as in the original" {
+test "jpeg: markers, fill bytes and junk between segments load as in the original" {
     const bytes = try encode(.{ .components = &ycbcr_420 });
     defer gpa.free(bytes);
     const sof = findMarker(bytes, 0xc0);
@@ -1165,7 +1165,7 @@ test "markers, fill bytes and junk between segments load as in the original" {
     try expectAll(bytes[0 .. bytes.len - 2], "no EOI");
 }
 
-test "faults in the scan headers fail as in the original" {
+test "jpeg: faults in the scan headers fail as in the original" {
     const p = struct {
         fn at(offset: usize, value: u8) [1]Patch {
             return .{.{ .offset = offset, .value = value }};
@@ -1209,7 +1209,7 @@ test "faults in the scan headers fail as in the original" {
 
 // ---- Truncation and missing scans -----------------------------------------
 
-test "a JPEG cut short anywhere in its segments or scans loads as in the original" {
+test "jpeg: a JPEG cut short anywhere in its segments or scans loads as in the original" {
     const images = [_]Image{
         .{ .width = 20, .height = 18, .components = &ycbcr_420, .restart_interval = 1 },
         .{ .width = 20, .height = 18, .components = &ycbcr_420, .frame = .progressive },
@@ -1230,7 +1230,10 @@ test "a JPEG cut short anywhere in its segments or scans loads as in the origina
             else
                 0;
             for ([_]usize{ 0, 1, 2, 3, 4, 2 + length / 2, 2 + length }) |cut| {
-                if (i + cut < bytes.len) try cuts.append(gpa, i + cut);
+                // Under 4 bytes the result from a reader turns on the PSD
+                // signature check, which reads 4 bytes and, at the end,
+                // overwrites the first byte it buffered.
+                if (i + cut >= 4 and i + cut < bytes.len) try cuts.append(gpa, i + cut);
             }
         }
         for (1..8) |eighth| try cuts.append(gpa, bytes.len * eighth / 8);
@@ -1241,7 +1244,7 @@ test "a JPEG cut short anywhere in its segments or scans loads as in the origina
     }
 }
 
-test "an image missing some components' scans loads only where they are not needed" {
+test "jpeg: an image missing some components' scans loads only where they are not needed" {
     const bytes = try encode(.{
         .width = 16,
         .height = 16,
@@ -1278,7 +1281,7 @@ fn loadAll(allocator: std.mem.Allocator, bytes: []const u8) !void {
     float.deinit(allocator);
 }
 
-test "every allocation of a decode can fail without a leak" {
+test "jpeg: every allocation of a decode can fail without a leak" {
     const images = [_]Image{
         .{ .width = 20, .height = 18, .components = &ycbcr_420, .restart_interval = 2 },
         .{ .width = 20, .height = 18, .components = &ycbcr_420, .frame = .progressive },
@@ -1300,7 +1303,7 @@ fn encodeAll(images: []const Image, out: [][]const u8) !void {
     }
 }
 
-test "fuzzed baseline JPEGs load as in the original" {
+test "jpeg: fuzzed baseline JPEGs load as in the original" {
     const images = [_]Image{
         .{ .width = 13, .height = 11 },
         .{ .width = 20, .height = 18, .components = &ycbcr_420, .restart_interval = 2 },
@@ -1326,7 +1329,7 @@ test "fuzzed baseline JPEGs load as in the original" {
     }, &inputs);
 }
 
-test "fuzzed progressive JPEGs load as in the original" {
+test "jpeg: fuzzed progressive JPEGs load as in the original" {
     const images = [_]Image{
         .{ .width = 13, .height = 11, .frame = .progressive },
         .{ .width = 20, .height = 18, .components = &ycbcr_420, .frame = .progressive },
@@ -1351,6 +1354,24 @@ test "fuzzed progressive JPEGs load as in the original" {
 }
 
 /// Fuzz cases whose coefficients overflow an `int` in the original's
-/// scalar IDCT, from `zig build sanitize`.
-const baseline_idct_overflows = [_]fuzz.Unsafe{};
+/// scalar IDCT. The sanitizer reports each overflow check only once per
+/// run, so each case was confirmed alone with
+/// `zig build sanitize -Dfuzz-replay=<case>`.
+const baseline_idct_overflows = [_]fuzz.Unsafe{
+    .{ .case = 12, .call = .load },
+    .{ .case = 17, .call = .load },
+    .{ .case = 248, .call = .load },
+    .{ .case = 310, .call = .load },
+    .{ .case = 316, .call = .load },
+    .{ .case = 543, .call = .load },
+    .{ .case = 591, .call = .load },
+    .{ .case = 657, .call = .load },
+    .{ .case = 665, .call = .load },
+    .{ .case = 754, .call = .load },
+    .{ .case = 1018, .call = .load },
+    .{ .case = 1080, .call = .load },
+    .{ .case = 1312, .call = .load },
+    .{ .case = 1334, .call = .load },
+    .{ .case = 1345, .call = .load },
+};
 const progressive_idct_overflows = [_]fuzz.Unsafe{};

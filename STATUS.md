@@ -23,8 +23,9 @@ picks it up; the git log has the detail.
   `src/settings.zig`; `src/errors.zig`), the public API in
   `src/stb_image.zig`, and the oracle (`test/shim/oracle.c`,
   `test/oracle.zig`, `test/fuzz.zig`, `test/corpus.zig`).
-- **Placeholders:** every format file in `src/` (detects nothing), `src/zlib.zig`
-  (empty) and `src/pow.zig` (std's `pow`, not the C library's).
+- **Placeholders:** every format file in `src/` but `src/png.zig` (detects
+  nothing) and `src/pow.zig` (std's `pow`, not the C library's).
+- **zlib and PNG:** ported and oracle-tested on `port/png`.
 - **Next:** the decoders, each with its oracle tests:
   zlib and PNG; JPEG; the other seven formats and `pow`. Then the
   benchmark, the docs, and steps 5 to 7 of the methodology.
@@ -42,14 +43,14 @@ picks it up; the git log has the detail.
 
 | format | upstream | zig-stb-image | tests | state |
 | --- | --- | --- | --- | --- |
-| JPEG baseline | `stbi__jpeg_*` | `src/jpeg.zig` | `test/jpeg_test.zig`: the jpeg-decoder, libjpeg-turbo and image-rs corpora; "every sampling factor combination the original accepts …", "sizes that are not whole blocks or MCUs …", "the frame types and table variants …", "faults in the frame header / tables / scan headers fail as in the original", "a JPEG cut short anywhere …", "fuzzed baseline JPEGs load as in the original" | oracle-tested |
-| JPEG progressive | as above | as above | as above, and "fuzzed progressive JPEGs load as in the original" | oracle-tested |
-| JPEG restart markers, DNL, Adobe and JFIF colour transforms, CMYK and YCCK | as above | as above | "restart intervals and every restart marker …", "a DNL segment …", "every colour model decodes as in the original" | oracle-tested |
-| JPEG IDCT of the SSE2 build | `stbi__idct_simd` | `-Djpeg-idct=sse2` | the JPEG suite run with `-Djpeg-idct=sse2`; "coefficients past 16 bits give the samples of the original build the port follows" | oracle-tested, awaiting the author's approval |
-| PNG 1, 2, 4, 8, 16 bits, every colour type, palettes, tRNS | `stbi__png_*` | `src/png.zig` | | not started |
-| PNG Adam7 interlace | as above | as above | | not started |
-| PNG iPhone CgBI, BGR conversion and unpremultiply | `stbi__de_iphone` | as above | | not started |
-| zlib (inflate) | `stbi__zbuf`, `stbi__parse_zlib` | `src/zlib.zig` | | not started |
+| JPEG baseline | `stbi__jpeg_*` | `src/jpeg.zig` | `test/jpeg_test.zig`: the jpeg-decoder, libjpeg-turbo and image-rs corpora; "jpeg: every sampling factor combination the original accepts …", "jpeg: sizes that are not whole blocks or MCUs …", "jpeg: the frame types and table variants …", "jpeg: faults in the frame header … / tables … / scan headers fail as in the original", "jpeg: a JPEG cut short anywhere …", "jpeg: fuzzed baseline JPEGs load as in the original" | oracle-tested |
+| JPEG progressive | as above | as above | as above, and "jpeg: fuzzed progressive JPEGs load as in the original" | oracle-tested |
+| JPEG restart markers, DNL, Adobe and JFIF colour transforms, CMYK and YCCK | as above | as above | "jpeg: restart intervals and every restart marker …", "jpeg: a DNL segment …", "jpeg: every colour model decodes as in the original" | oracle-tested |
+| JPEG IDCT of the SSE2 build | `stbi__idct_simd` | `-Djpeg-idct=sse2` | the JPEG suite run with `-Djpeg-idct=sse2`; "jpeg: coefficients past 16 bits give the samples of the original build the port follows" | oracle-tested, awaiting the author's approval |
+| PNG 1, 2, 4, 8, 16 bits, every colour type, palettes, tRNS | `stbi__png_*` | `src/png.zig` | "png: the PngSuite's …" (primary, check, 16-bit, corrupt, unused), "png: image-rs's PNG images …", "png: libjpeg-turbo's PNG images …", "png: every colour type, bit depth, filter, interlacing and size …", "png: a tRNS colour key …", "png: damaged headers and chunks …", "png: every truncation …", "png: IDAT data in many chunks …", "png: more pixel data …", "png: the largest dimensions …", "png: a smaller dimension limit …", "png: palette indices past every PLTE …", "fuzz: mutated PNGs …", "png: each allocation failure …" | oracle-tested |
+| PNG Adam7 interlace | as above | as above | as above | oracle-tested |
+| PNG iPhone CgBI, BGR conversion and unpremultiply | `stbi__de_iphone` | as above | "png: the iPhone images …", "png: iPhone PNGs convert to RGB and unpremultiply …", "fuzz: mutated PNGs …" | oracle-tested |
+| zlib (inflate) | `stbi__zbuf`, `stbi__parse_zlib` | `src/zlib.zig` | "zlib: every block type and block size …", "zlib: corrupt, truncated and odd streams …", "zlib: zero bits past the end …", "zlib: initial sizes of 0 and 1 …", "zlib: the IDAT streams of the PNG corpus …", "fuzz: mutated zlib and raw DEFLATE streams …", "zlib: each allocation failure …" | oracle-tested |
 | TGA | `stbi__tga_*` | `src/tga.zig` | | not started |
 | BMP | `stbi__bmp_*` | `src/bmp.zig` | | not started |
 | PSD (composited image, 8 and 16 bits, RLE and raw) | `stbi__psd_*` | `src/psd.zig` | | not started |
@@ -72,14 +73,14 @@ picks it up; the git log has the detail.
 | `stbi_is_16_bit_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_16_bit` | `is16BitFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | ported |
 | `stbi_is_hdr_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_hdr` | `isHdrFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | ported |
 | `desired_channels`, `*channels_in_file` | `Options.components`, `Image.channels` and `Image.channels_in_file` | every load compares all five | ported |
-| `stbi_set_flip_vertically_on_load`, `…_thread` | `Options.flip_vertically`; `settings.setFlipVerticallyOnLoad`, `…Thread` | | ported |
-| `stbi_set_unpremultiply_on_load`, `…_thread` | `Options.unpremultiply`; `settings.setUnpremultiplyOnLoad`, `…Thread` | | ported |
-| `stbi_convert_iphone_png_to_rgb`, `…_thread` | `Options.convert_iphone_png`; `settings.convertIphonePngToRgb`, `…Thread` | | ported |
+| `stbi_set_flip_vertically_on_load`, `…_thread` | `Options.flip_vertically`; `settings.setFlipVerticallyOnLoad`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
+| `stbi_set_unpremultiply_on_load`, `…_thread` | `Options.unpremultiply`; `settings.setUnpremultiplyOnLoad`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
+| `stbi_convert_iphone_png_to_rgb`, `…_thread` | `Options.convert_iphone_png`; `settings.convertIphonePngToRgb`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
 | `stbi_hdr_to_ldr_gamma`, `stbi_hdr_to_ldr_scale` | `Options.hdr_to_ldr_gamma`, `…_scale`; `settings.setHdrToLdrGamma`, `…Scale` | | ported |
 | `stbi_ldr_to_hdr_gamma`, `stbi_ldr_to_hdr_scale` | `Options.ldr_to_hdr_gamma`, `…_scale`; `settings.setLdrToHdrGamma`, `…Scale` | | ported |
 | `stbi_failure_reason` | the returned `Error`; `failureReason(err)` | every failing load compares it | ported |
 | `stbi_image_free` | `Image.deinit`, `Animation.deinit` | every test runs on `std.testing.allocator` | ported |
-| `stbi_zlib_decode_malloc_guesssize`, `…_malloc`, `…_malloc_guesssize_headerflag`, `…_buffer`, `…_noheader_malloc`, `…_noheader_buffer` | `zlib` | | not started |
+| `stbi_zlib_decode_malloc_guesssize`, `…_malloc`, `…_malloc_guesssize_headerflag`, `…_buffer`, `…_noheader_malloc`, `…_noheader_buffer` | `zlib.decodeAlloc` (`initial_size`, `parse_header`), `zlib.decodeBuffer` (`parse_header`) | "zlib: every block type and block size … through all six functions" and the other zlib tests | oracle-tested |
 
 ## Build options
 
@@ -101,11 +102,35 @@ picks it up; the git log has the detail.
 
 ## Left out (awaiting the author's approval)
 
-To be completed with the decoders.
+Where the port departs from the original. `doc/parity.md` has the detail and
+the tests of each case where the original is unsafe or never returns.
+
+### zlib and PNG
+
+- **Initial size 0:** the original's zlib decode loops for ever when
+  `initial_size` is 0 and there is output; the port fails with `OutOfMemory`.
+- **Palette indices past every PLTE entry:** the original reads
+  uninitialized stack memory into the pixels; the port fails with the new
+  `error.PngPaletteIndex` ("bad palette index", "Corrupt PNG"). The other
+  choice would be to read unset entries as zero.
+- **An empty IDAT before any data:** the original calls `memcpy` on a null
+  pointer for 0 bytes (undefined in C, harmless in practice); the port gives
+  the original's result, so nothing is refused.
+- **Allocation:** the port allocates as data arrives rather than up front
+  (the zlib output starts at the guessed size but no more than the input
+  could fill, IDAT data is read in 1 MiB pieces, the final interlaced image
+  only once every pass has decoded). On every input the result and reason
+  are the original's; only where the original's large allocation would fail
+  and the port's smaller ones succeed, or the reverse, can the two differ.
+- **Dead checks:** the original's "bad bits_per_channel" and bad
+  `req_comp` paths cannot be reached through the public API; the port has
+  no such checks.
+- **Not reached by tests:** a PNG whose IDAT data passes 2^31 bytes and a
+  zlib output past 2^31 bytes need gigabytes of input; the port fails both
+  as the original does (the first sets no new reason, the second sets "outofmem"),
+  checked by reading only.
 
 ### JPEG
-
-Each case is described in `doc/parity.md`, with its tests.
 
 - Where the original reads sample or coefficient memory it never wrote
   (missing or truncated scans, segments after the frame header it fails to

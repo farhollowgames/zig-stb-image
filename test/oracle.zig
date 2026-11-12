@@ -62,6 +62,10 @@ pub const upstream = struct {
         reason: *?[*:0]const u8,
     ) ?[*]u8;
     pub extern fn simd_pow(x: f64, y: f64) f64;
+    pub extern fn simd_set_flag(which: c_int, thread: c_int, value: c_int) void;
+    pub extern fn scalar_set_flag(which: c_int, thread: c_int, value: c_int) void;
+    pub extern fn simd_get_flags(flip: *c_int, unpremultiply: *c_int, iphone: *c_int) void;
+    pub extern fn scalar_get_flags(flip: *c_int, unpremultiply: *c_int, iphone: *c_int) void;
 };
 
 fn loadFn(path: Path) *const fn ([*]const u8, usize, c_int, *const Settings, *Result) callconv(.c) void {
@@ -193,7 +197,9 @@ fn reasonMatches(err: anyerror, reason: ?[*:0]const u8, path: Path) bool {
         .scalar => stbi.failureMessage(port_err),
     };
     if (port_err == error.UnknownPngChunk and path == .simd) {
-        // The original names the chunk: "abcd PNG chunk not known".
+        // The original names the chunk: "abcd PNG chunk not known", which
+        // a zero byte in the name cuts short.
+        if (theirs.len < 4) return true;
         return theirs.len == 4 + 1 + ours.len and std.mem.eql(u8, theirs[5..], ours);
     }
     return std.mem.eql(u8, theirs, ours);
@@ -270,12 +276,20 @@ fn setMallocFill(path: Path, fill: c_int) void {
 /// Whether the original's result for `request` depends on memory it
 /// allocated and never wrote: whether either build gives another result,
 /// failure reason or file position when every allocation is filled with
-/// 0x00 than when it is filled with 0xff.
+/// 0x00 than when it is filled with 0xff or 0x5a. (Two fills alone can
+/// agree by chance: 0x00 and 0xff both make a CMYK pixel black.)
 fn readsUnwritten(bytes: []const u8, request: Request, mem_file: ?MemFile) bool {
+    for ([_]c_int{ 0xff, 0x5a }) |other| {
+        if (fillsDiffer(bytes, request, mem_file, .{ 0x00, other })) return true;
+    }
+    return false;
+}
+
+fn fillsDiffer(bytes: []const u8, request: Request, mem_file: ?MemFile, fills: [2]c_int) bool {
     var settings = request.settings();
     for ([_]Path{ .simd, .scalar }) |path| {
         var results: [2]Result = undefined;
-        for (&results, [_]c_int{ 0x00, 0xff }) |*result, fill| {
+        for (&results, fills) |*result, fill| {
             if (mem_file) |m| {
                 m.seek(request.file_offset);
                 settings.fd = m.fd;

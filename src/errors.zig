@@ -99,6 +99,9 @@ pub const Error = error{
     PicTooManyPackets,
     PngBadBitDepth,
     PngBadBitsPerChannel,
+    /// A palette index no PLTE chunk set: the original reads uninitialized
+    /// memory there, the port refuses the image.
+    PngPaletteIndex,
     PnmIntegerOverflow,
     PnmMaxValueTooLarge,
     PsdBadCompression,
@@ -262,6 +265,7 @@ fn strings(err: Error) [2][]const u8 {
             "bad bits_per_channel",
             "PNG not supported: unsupported color depth",
         },
+        error.PngPaletteIndex => .{ "bad palette index", "Corrupt PNG" },
         error.PnmIntegerOverflow => .{
             "integer parse overflow",
             "Parsing an integer in the PPM header overflowed a 32-bit int",
