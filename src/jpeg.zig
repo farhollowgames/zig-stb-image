@@ -605,6 +605,14 @@ const Decoder = struct {
         out_stride: usize,
         data: *const [64]i16,
     ) Error!void {
+        const coefficients: @Vector(64, i16) = data.*;
+        const nonzero: u64 = @bitCast(coefficients != @as(@Vector(64, i16), @splat(0)));
+        if (nonzero >> 1 == 0) {
+            // Only the DC term: 64 equal samples, as both IDCTs give.
+            const sample = dcSample(data[0]);
+            for (0..8) |row| out[row * out_stride ..][0..8].* = @splat(sample);
+            return;
+        }
         switch (idct_kind) {
             .scalar => idctBlock(out, out_stride, data) catch
                 return z.source.fail(error.JpegIdctOverflow),
@@ -1651,6 +1659,19 @@ fn idctBlock(out: []u8, out_stride: usize, data: *const [64]i16) error{Overflow}
     }
 }
 
+/// The sample of every position of a block with only its DC coefficient
+/// `dc`, as the build's IDCT computes it: the column pass gives `4 * dc` in
+/// column 0 and zeros elsewhere (saturated to 16 bits by the SSE2 IDCT), and
+/// the row pass gives every sample from that alone. No step overflows.
+fn dcSample(dc: i16) u8 {
+    const wide = 4 * @as(i32, dc);
+    const column = switch (idct_kind) {
+        .scalar => wide,
+        .sse2 => std.math.clamp(wide, std.math.minInt(i16), std.math.maxInt(i16)),
+    };
+    return @intCast(std.math.clamp((column * 4096 + row_bias) >> row_shift, 0, 255));
+}
+
 /// Eight 16-bit values, one per column (or row) of a block.
 const I16x8 = @Vector(8, i16);
 const I32x8 = @Vector(8, i32);
@@ -1979,5 +2000,19 @@ test "the vector 2 by 2 upsampling gives the bytes of the scalar one" {
         resampleRowHv2Samples(&expected, near[0..w], far[0..w]);
         resampleRowHv2(&actual, near[0..w], far[0..w]);
         try std.testing.expectEqualSlices(u8, expected[0 .. 2 * w + 1], actual[0 .. 2 * w + 1]);
+    }
+}
+
+test "a block with only its DC term gives the samples of the full IDCT" {
+    var dc: i32 = std.math.minInt(i16);
+    while (dc <= std.math.maxInt(i16)) : (dc += 1) {
+        var data: [64]i16 = @splat(0);
+        data[0] = @intCast(dc);
+        var expected: [64]u8 = undefined;
+        switch (idct_kind) {
+            .scalar => try idctBlock(&expected, 8, &data),
+            .sse2 => idctBlockSse2(&expected, 8, &data),
+        }
+        try std.testing.expectEqualSlices(u8, &expected, &@as([64]u8, @splat(dcSample(data[0]))));
     }
 }
