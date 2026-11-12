@@ -83,6 +83,15 @@ performance pass, the skeptic's review, the fixes) are not started.
   TGA and the shared component conversion). Each kept change is one commit
   whose message gives its benchmark gain; the oracle tests are not edited
   for speed.
+- **Performance: JPEG** (`perf/jpeg`). Time port / original SSE2, best
+  of 3, `zig build bench -- --filter jpeg --rounds 3`: 4:4:4 1.08, 4:2:0
+  1.17, 4:2:0 to rgba 2.13, grey 1.19, progressive 1.14, ycck 1.10. Done:
+  the SSE2-mode IDCT on `@Vector` lanes; `-Djpeg-idct` defaults to `sse2`
+  on x86-64. Left: `@Vector` YCbCr to RGB/RGBA and 2x2 upsampling, the
+  grey copy, the YCCK and CMYK blends, Huffman and per-block overhead, the
+  scalar IDCT. Resume: measure a change with the filtered bench in the same
+  session before and after; run `test -Dtest-filter=jpeg` in both
+  `-Djpeg-idct` modes.
 - **Left to do:**
   1. Step 5, the performance pass, by an agent that did not write the port,
      on branch `review/perf-and-skeptic`. Zig 0.17 never vectorizes loops,
@@ -120,7 +129,7 @@ performance pass, the skeptic's review, the fixes) are not started.
 | JPEG baseline | `stbi__jpeg_*` | `src/jpeg.zig` | `test/jpeg_test.zig`: the jpeg-decoder, libjpeg-turbo and image-rs corpora; "jpeg: every sampling factor combination the original accepts …", "jpeg: sizes that are not whole blocks or MCUs …", "jpeg: the frame types and table variants …", "jpeg: faults in the frame header … / tables … / scan headers fail as in the original", "jpeg: a JPEG cut short anywhere …", "jpeg: fuzzed baseline JPEGs load as in the original" | oracle-tested |
 | JPEG progressive | as above | as above | as above, and "jpeg: fuzzed progressive JPEGs load as in the original" | oracle-tested |
 | JPEG restart markers, DNL, Adobe and JFIF colour transforms, CMYK and YCCK | as above | as above | "jpeg: restart intervals and every restart marker …", "jpeg: a DNL segment …", "jpeg: every colour model decodes as in the original" | oracle-tested |
-| JPEG IDCT of the SSE2 build | `stbi__idct_simd` | `-Djpeg-idct=sse2` | the JPEG suite run with `-Djpeg-idct=sse2`; "jpeg: coefficients past 16 bits give the samples of the original build the port follows" | oracle-tested, awaiting the author's approval |
+| JPEG IDCT of the SSE2 build | `stbi__idct_simd` | `-Djpeg-idct=sse2`, the default on x86-64 | the JPEG suite run with `-Djpeg-idct=sse2`; "jpeg: coefficients past 16 bits give the samples of the original build the port follows"; "the vector SSE2 IDCT gives the samples of the SSE2 IDCT computed lane by lane" (`src/jpeg.zig`) | oracle-tested |
 | PNG 1, 2, 4, 8, 16 bits, every colour type, palettes, tRNS | `stbi__png_*` | `src/png.zig` | "png: the PngSuite's …" (primary, check, 16-bit, corrupt, unused), "png: image-rs's PNG images …", "png: libjpeg-turbo's PNG images …", "png: every colour type, bit depth, filter, interlacing and size …", "png: a tRNS colour key …", "png: damaged headers and chunks …", "png: every truncation …", "png: IDAT data in many chunks …", "png: more pixel data …", "png: the largest dimensions …", "png: a smaller dimension limit …", "png: palette indices past every PLTE …", "fuzz: mutated PNGs …", "png: each allocation failure …" | oracle-tested |
 | PNG Adam7 interlace | as above | as above | as above | oracle-tested |
 | PNG iPhone CgBI, BGR conversion and unpremultiply | `stbi__de_iphone` | as above | "png: the iPhone images …", "png: iPhone PNGs convert to RGB and unpremultiply …", "fuzz: mutated PNGs …" | oracle-tested |
@@ -169,7 +178,7 @@ performance pass, the skeptic's review, the fixes) are not started.
 | `STBI_SUPPORT_ZLIB`, `STBI_NO_ZLIB` | none: `zlib` is compiled only where used | left out (approved) |
 | `STBI_MALLOC`, `STBI_REALLOC`, `STBI_REALLOC_SIZED`, `STBI_FREE` | the `std.mem.Allocator` each call takes | ported |
 | `STBI_ASSERT` | Zig's safety checks | ported |
-| `STBI_NO_SIMD`, `STBI_SSE2`, `STBI_NEON` | `-Djpeg-idct=scalar` (default) or `sse2`: the JPEG IDCT whose samples to give where the two differ; no SIMD code yet (see "Left out") | left out (approved) |
+| `STBI_NO_SIMD`, `STBI_SSE2`, `STBI_NEON` | `-Djpeg-idct=sse2` (default on x86-64) or `scalar` (default elsewhere): the JPEG IDCT whose samples to give where the two differ (see "Left out") | left out (approved) |
 | `STBI_NO_THREAD_LOCALS` | none: Zig has `threadlocal` on every target the port builds for | left out (approved) |
 | `STBI_WINDOWS_UTF8`, `stbi_convert_wchar_to_utf8` | none: Zig paths are UTF-8 on Windows already | left out (approved) |
 | `STB_IMAGE_STATIC`, `STBIDEF`, `STB_IMAGE_IMPLEMENTATION` | none: C linkage only | left out (approved) |
@@ -188,9 +197,9 @@ the tests of each case where the original is unsafe or never returns.
 - `STBI_NO_SIMD`, `STBI_SSE2`, `STBI_NEON`: no option. The original's SSE2
   and scalar paths give the same pixels on every valid file, and the tests
   compare the port with both. They differ on JPEG coefficients past 16
-  bits; `-Djpeg-idct=scalar|sse2` picks which the port follows (scalar by
-  default; upstream builds SSE2 by default on x86-64). The NEON build is
-  not followed.
+  bits; `-Djpeg-idct=scalar|sse2` picks which the port follows (SSE2 by
+  default on x86-64, as upstream builds there, scalar elsewhere). The NEON
+  build is not followed.
 - `STBI_NO_THREAD_LOCALS`: no option; Zig has `threadlocal` on every target
   the port builds for.
 - `STBI_WINDOWS_UTF8` and `stbi_convert_wchar_to_utf8`: left out; Zig paths
@@ -233,11 +242,11 @@ the tests of each case where the original is unsafe or never returns.
   scalar port refuses with `error.JpegIdctOverflow`. The corpus file
   `imagetestsuite/b0b8914cc5f7a6eff409f16d8cc236c5.jpg` is one.
 - The original's SSE2 and scalar builds give other samples on coefficients
-  past 16 bits; `-Djpeg-idct` picks the one the port follows (scalar by
-  default). The NEON build is not followed.
-- The SIMD code of the SSE2 build (IDCT, YCbCr conversion, 2x2 upsampling)
-  is computed with scalar code that gives its results; vector code waits for
-  the performance pass.
+  past 16 bits; `-Djpeg-idct` picks the one the port follows (SSE2 by
+  default on x86-64, scalar elsewhere). The NEON build is not followed.
+- The SSE2 build's IDCT is `@Vector` code computing what its intrinsics
+  compute; its YCbCr conversion and 2x2 upsampling give the scalar ones'
+  bytes, which the port's vector code also gives.
 - Arithmetic-coded (SOF9 to SOF15), lossless (SOF3) and 12-bit JPEGs are
   refused as the original refuses them.
 

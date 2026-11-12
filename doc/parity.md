@@ -83,8 +83,8 @@ approved each case.
   saturates between the passes, where the scalar one keeps them whole; on
   coefficients that need more than 16 bits the two builds give other
   samples. The port follows one of them, chosen at build time with
-  `-Djpeg-idct=scalar` (the default) or `-Djpeg-idct=sse2`
-  (`stbi.jpeg_idct`). The SSE2 port is defined on every input and never
+  `-Djpeg-idct=sse2` (the default on x86-64, as upstream builds there) or
+  `-Djpeg-idct=scalar` (the default elsewhere) (`stbi.jpeg_idct`). The SSE2 port is defined on every input and never
   refuses. Where the builds disagree, the oracle holds the port to the
   build it follows. Tests: "jpeg: coefficients past 16 bits give the samples of
   the original build the port follows"; the whole JPEG suite runs in both
