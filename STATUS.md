@@ -123,8 +123,15 @@ inflate 0.82; png rgb 0.85, rgba 0.84, grey 0.92, rgb 16-bit 0.91, adam7
 - **Kept:** inflate's Huffman loop keeps its bit buffer in locals and fills
   it with one 32-bit load.
 - **Dropped:** copying matches eight bytes at a time (no measurable gain).
-- **Left:** row unfiltering with `@Vector` pixels; palette expansion; the
-  16-bit byte swap; the RGB-to-RGBA alpha expansion.
+- **In progress (work-in-progress commit, not yet tested or measured):**
+  row unfiltering a pixel at a time as `@Vector(bpp, u8)` for each byte
+  depth (`unfilterPixels` in `src/png.zig`), with a vector Paeth and
+  32-byte `up`. Next: run the PNG tests and the PNG bench rows; keep it
+  only if they pass and gain, else revert that commit.
+- **Left:** palette expansion (a draft that checks the largest index once
+  and copies entries as 4-byte words is in the scratchpad as
+  `perf-png/palette_edit.py`); the 16-bit byte swap; the RGB-to-RGBA alpha
+  expansion; unfiltering straight into the image to drop the row copy.
 - **Resume:** `zig build bench -- --filter png --rounds 3` (and `--filter
   zlib`) through the build wrapper; tests with `-Dtest-filter=zlib
   -Dtest-filter=png -Dtest-filter=PNG -Dtest-filter=DEFLATE`.

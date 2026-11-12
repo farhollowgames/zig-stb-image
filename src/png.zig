@@ -610,45 +610,92 @@ fn unfilter(
     in: []const u8,
     filter_bytes: usize,
 ) void {
+    switch (filter_bytes) {
+        // One byte below 8 bits, else the bytes of a pixel at 8 or 16 bits.
+        inline 1, 2, 3, 4, 6, 8 => |bpp| unfilterPixels(bpp, filter, cur, prior, in),
+        else => unreachable,
+    }
+}
+
+/// `unfilter` for `bpp`-byte pixels, a pixel at a time: rows hold whole
+/// pixels, and each pixel depends on the one on its left.
+fn unfilterPixels(
+    comptime bpp: usize,
+    filter: Filter,
+    cur: []u8,
+    prior: []const u8,
+    in: []const u8,
+) void {
+    const Pixel = @Vector(bpp, u8);
     const nk = cur.len;
     switch (filter) {
         .none => @memcpy(cur, in),
         .sub => {
-            @memcpy(cur[0..filter_bytes], in[0..filter_bytes]);
-            for (filter_bytes..nk) |k| cur[k] = in[k] +% cur[k - filter_bytes];
+            var a: Pixel = in[0..bpp].*;
+            cur[0..bpp].* = a;
+            var k: usize = bpp;
+            while (k < nk) : (k += bpp) {
+                a +%= @as(Pixel, in[k..][0..bpp].*);
+                cur[k..][0..bpp].* = a;
+            }
         },
-        .up => for (cur, in, prior) |*c, i, p| {
-            c.* = i +% p;
+        .up => {
+            const lanes = 32;
+            var k: usize = 0;
+            while (nk - k >= lanes) : (k += lanes) {
+                const i: @Vector(lanes, u8) = in[k..][0..lanes].*;
+                const p: @Vector(lanes, u8) = prior[k..][0..lanes].*;
+                cur[k..][0..lanes].* = i +% p;
+            }
+            for (cur[k..], in[k..], prior[k..]) |*c, i, p| c.* = i +% p;
         },
         .avg => {
-            for (0..filter_bytes) |k| cur[k] = in[k] +% (prior[k] >> 1);
-            for (filter_bytes..nk) |k| {
-                const average: u8 = @intCast((@as(u16, prior[k]) + cur[k - filter_bytes]) >> 1);
-                cur[k] = in[k] +% average;
+            var a: Pixel = @as(Pixel, in[0..bpp].*) +% (@as(Pixel, prior[0..bpp].*) >> @splat(1));
+            cur[0..bpp].* = a;
+            var k: usize = bpp;
+            while (k < nk) : (k += bpp) {
+                const b: Pixel = prior[k..][0..bpp].*;
+                // `(a + b) >> 1` without leaving 8 bits.
+                const average = (a & b) +% ((a ^ b) >> @splat(1));
+                a = @as(Pixel, in[k..][0..bpp].*) +% average;
+                cur[k..][0..bpp].* = a;
             }
         },
         .paeth => {
-            for (0..filter_bytes) |k| cur[k] = in[k] +% prior[k];
-            for (filter_bytes..nk) |k| {
-                cur[k] = in[k] +% paeth(cur[k - filter_bytes], prior[k], prior[k - filter_bytes]);
+            var a: Pixel = @as(Pixel, in[0..bpp].*) +% @as(Pixel, prior[0..bpp].*);
+            cur[0..bpp].* = a;
+            var k: usize = bpp;
+            while (k < nk) : (k += bpp) {
+                const b: Pixel = prior[k..][0..bpp].*;
+                const c: Pixel = prior[k - bpp ..][0..bpp].*;
+                a = @as(Pixel, in[k..][0..bpp].*) +% paeth(bpp, a, b, c);
+                cur[k..][0..bpp].* = a;
             }
         },
         .avg_first => {
-            @memcpy(cur[0..filter_bytes], in[0..filter_bytes]);
-            for (filter_bytes..nk) |k| cur[k] = in[k] +% (cur[k - filter_bytes] >> 1);
+            var a: Pixel = in[0..bpp].*;
+            cur[0..bpp].* = a;
+            var k: usize = bpp;
+            while (k < nk) : (k += bpp) {
+                a = @as(Pixel, in[k..][0..bpp].*) +% (a >> @splat(1));
+                cur[k..][0..bpp].* = a;
+            }
         },
     }
 }
 
-/// `stbi__paeth`: the Paeth predictor in the original's branch-free form,
-/// which equals the PNG specification's.
-fn paeth(a: u8, b: u8, c: u8) u8 {
-    const thresh = @as(i32, c) * 3 - (@as(i32, a) + b);
-    const lo: i32 = @min(a, b);
-    const hi: i32 = @max(a, b);
-    const t0: i32 = if (hi <= thresh) lo else c;
-    const t1 = if (thresh <= lo) hi else t0;
-    return @intCast(t1);
+/// `stbi__paeth` on each lane: the Paeth predictor in the original's
+/// branch-free form, which equals the PNG specification's.
+fn paeth(comptime n: usize, a: @Vector(n, u8), b: @Vector(n, u8), c: @Vector(n, u8)) @Vector(n, u8) {
+    const Wide = @Vector(n, i16);
+    const a16: Wide = a;
+    const b16: Wide = b;
+    const c16: Wide = c;
+    const thresh = c16 * @as(Wide, @splat(3)) - (a16 + b16);
+    const lo = @min(a, b);
+    const hi = @max(a, b);
+    const t0 = @select(u8, @as(Wide, hi) <= thresh, lo, c);
+    return @select(u8, thresh <= @as(Wide, lo), hi, t0);
 }
 
 /// Unpacks samples of `depth` bits, high bits first, one per byte of
