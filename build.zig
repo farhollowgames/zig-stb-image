@@ -81,6 +81,56 @@ pub fn build(b: *std.Build) void {
         .fuzz_replay = fuzz_replay,
         .sanitize = true,
     });
+
+    addBench(b, target, format_module);
+}
+
+/// `zig build bench`: the port at ReleaseFast against the original at -O3,
+/// for the same CPU. Arguments after `--` go to the benchmark.
+fn addBench(b: *std.Build, target: std.Build.ResolvedTarget, format_module: *std.Build.Module) void {
+    const stb = b.lazyDependency("stb", .{}) orelse return;
+    const jpeg_decoder = b.lazyDependency("jpeg_decoder", .{}) orelse return;
+    const image_rs = b.lazyDependency("image_rs", .{}) orelse return;
+
+    const paths = b.addOptions();
+    paths.addOptionPath("photo", jpeg_decoder.path("tests/reftest/images/mjpeg.png"));
+    paths.addOptionPath("progressive", jpeg_decoder.path("tests/reftest/images/progressive3.jpg"));
+    paths.addOptionPath("ycck", jpeg_decoder.path("tests/reftest/images/ycck.jpg"));
+    paths.addOptionPath("gif", image_rs.path("tests/images/gif/anim/large-gif-anim-combine.gif"));
+
+    const port = b.createModule(.{
+        .root_source_file = b.path("src/stb_image.zig"),
+        .target = target,
+        .optimize = .fast,
+        .imports = &.{.{ .name = "stb_image_options", .module = format_module }},
+    });
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench.zig"),
+            .target = target,
+            .optimize = .fast,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "stb_image", .module = port },
+                .{ .name = "bench_paths", .module = paths.createModule() },
+            },
+        }),
+    });
+    bench.root_module.linkLibrary(oracleLibrary(b, target, .simd));
+    bench.root_module.linkLibrary(oracleLibrary(b, target, .scalar));
+    bench.root_module.addIncludePath(stb.path(""));
+    bench.root_module.addCSourceFile(.{
+        .file = b.path("bench/writers.c"),
+        .flags = &.{ "-O3", "-std=c99" },
+    });
+
+    const run = b.addRunArtifact(bench);
+    run.addPassthruArgs();
+    run.stdio = .inherit;
+    const step = b.step("bench", "Time the port against the original");
+    step.dependOn(&run.step);
+    step.dependOn(&b.addInstallArtifact(bench, .{}).step);
 }
 
 const TestConfig = struct {
