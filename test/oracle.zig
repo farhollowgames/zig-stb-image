@@ -685,6 +685,11 @@ const SanitizeCall = union(enum) { load, query: Query, gif };
 /// Under `zig build sanitize`: names the call on stderr, then runs only the
 /// original, built with AddressSanitizer and UndefinedBehaviorSanitizer,
 /// whose reports follow the name. `tools/sanitize.sh` pairs them up.
+///
+/// Each call runs in a child process of its own. The sanitizers keep going
+/// after a report, and an overrun the original makes can corrupt the heap
+/// for every call after it; and UndefinedBehaviorSanitizer reports each
+/// source line once per process, so a fresh process reports every call.
 fn sanitizeCall(
     bytes: []const u8,
     request: Request,
@@ -702,6 +707,27 @@ fn sanitizeCall(
         request.options.components,
         request.options.flip_vertically,
     });
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        sanitizedCalls(bytes, request, call);
+        std.c._exit(0);
+    }
+    var status: c_int = 0;
+    if (std.c.waitpid(pid, &status, 0) != pid) return error.WaitFailed;
+    const bits: u32 = @bitCast(status);
+    if (std.os.linux.W.IFSIGNALED(bits)) {
+        std.debug.print("stbi-crash: the original died of signal {d}\n", .{
+            @backingInt(std.os.linux.W.TERMSIG(bits)),
+        });
+    } else if (std.os.linux.W.EXITSTATUS(bits) != 0) {
+        std.debug.print("stbi-crash: the original exited with {d}\n", .{
+            std.os.linux.W.EXITSTATUS(bits),
+        });
+    }
+}
+
+fn sanitizedCalls(bytes: []const u8, request: Request, call: SanitizeCall) void {
     // Files go through memory here: the original reads them as it reads
     // callbacks, and the sanitizer run needs no descriptors.
     var settings = request.settings();

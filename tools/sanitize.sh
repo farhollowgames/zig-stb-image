@@ -14,7 +14,7 @@ LD_PRELOAD="$runtime" "$test_binary" >"$out/log.txt" 2>&1
 status=$?
 awk '
   /^stbi-case: / { label = $0; reported = 0; next }
-  /ERROR: AddressSanitizer|runtime error:/ {
+  /ERROR: AddressSanitizer|AddressSanitizer: CHECK failed|runtime error:|^stbi-crash: / {
     if (!reported) { print label; reported = 1 }
     print "    " $0
   }

@@ -1,0 +1,208 @@
+# Testing
+
+The sections up to "In this repository" are the same in every Farhollow
+Games port of a C or C++ library to Zig. The last section says how this
+repository applies them.
+
+## Oracle tests
+
+The original is pinned to one upstream commit and kept in `reference/` (or
+fetched as a lazy dependency), byte for byte as upstream has it. It is built
+only for the tests and the benchmark, and is never part of the package.
+
+An oracle test runs the original and the port on the same inputs and
+compares the results. Where the original is exact, the test compares every
+output byte and every returned value, not a summary such as a hash or one
+field of the result. The inputs are:
+
+- the original's own test data and demo assets, where it has them;
+- hand-made edge cases: empty input, one element, the largest size, and
+  degenerate cases;
+- seeded random inputs (see Fuzzing).
+
+`STATUS.md` lists every public function, option and mode of the original,
+and names the tests that check each one. Code coverage is not the measure:
+a feature counts as checked when a test compares it, not when a line is
+reached.
+
+## What "the same output" means
+
+- Bytes and integers are equal.
+- Floats are compared by their bit patterns, so `-0.0` differs from `0.0`,
+  and a NaN matches only a NaN with the same bits.
+- Where the original's output depends on how it is compiled (fused
+  multiply-add, fast-math, signed overflow), the reference is built with
+  flags that fix one result, and the port computes that result. The last
+  section names the flags.
+- Where a port deliberately computes differently from the original, a
+  written design gives the units, scales, overflow bounds and tolerances.
+  The port is then checked against an exact port within those tolerances,
+  and against itself exactly.
+
+## Fuzzing
+
+Each fuzz test draws its inputs from a seeded generator and runs at least
+1,000 cases. The seeds are recorded in the tests, so every run checks the
+same inputs. A failure prints its seed, and the configuration where there is
+one, so that it can be repeated. Where a repository has the option,
+`zig build test -Dfuzz-seed=N` changes every fuzz test's seed, to explore
+other inputs.
+
+## Malformed input
+
+Decoders and parsers are given truncated, corrupted and random bytes, and
+must give the original's result: the same output, the same error, or the
+same rejection. Where the port asserts a condition that the original
+reports as an error code, or that the original does not check, `STATUS.md`
+says so. Where a repository has contract tests, a program breaks one
+contract per run, and the test expects the abort and its message in the safe
+build modes.
+
+## Determinism
+
+The same inputs give the same output on every run. Where the library splits
+work over threads, the tests compare the output on 1, 2 and more threads
+with the output of one.
+
+## Build modes
+
+`zig build test` runs the tests in ReleaseSafe unless
+`-Dtest-optimize=<mode>` says otherwise. ReleaseSafe keeps every assert and
+integer overflow check on and runs the slow cases in reasonable time. The
+last section says which modes have been run.
+
+## Review
+
+After a port passes its oracle tests, a separate AI agent profiles it
+against the original and tunes the hot paths; each change is kept only if
+the oracle tests still pass and the benchmark shows a gain. Another AI agent
+then tries to break the claims: features left untested, comparisons that
+check too little, fuzzing too narrow, benchmarks that favour the port,
+undefined behaviour, integer overflow, and references that can outlive what
+they point to. Each confirmed finding is fixed with a test that failed
+before the fix. No person has yet reviewed the code or the tests.
+
+## In this repository
+
+### The original
+
+`reference/stb_image.h` is stb_image 2.30 as stb commit
+`a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d` has it. The tests build it twice
+with the clang that Zig carries, at `-O3 -std=c99 -ffp-contract=off
+-fno-fast-math -fno-sanitize=undefined`, through `test/shim/oracle.c`, a C
+interface that sets the original's global and thread-local settings before
+each call:
+
+- once as upstream builds it for x86-64, with its SSE2 paths;
+- once with `STBI_NO_SIMD` and `STBI_FAILURE_USERMSG`, which also gives each
+  failure reason in its long form.
+
+Every load is compared with both builds. Where the two builds give
+different pixels (JPEG coefficients past 16 bits, where the SSE2 IDCT
+saturates and the scalar one wraps), the port is compared with the build it
+follows, the scalar one unless `-Djpeg-idct=sse2`; the JPEG tests run in
+both modes. With fused multiply-adds off, float steps round as written, as
+Zig's do. The original calls the C library's `pow`; the port carries
+glibc 2.44's, which on this machine is the one the original calls
+([`parity.md`](parity.md) has the detail).
+
+### What a test compares
+
+Each load compares, with both builds of the original: success or failure,
+width, height, channels in the file and returned, every output byte (16-bit
+samples by value, floats by their bits), the failure reason in its short and
+long forms, and, for loads from a file, where the file is left afterwards.
+`oracle.expectAllSame` runs a file through every combination the API has:
+8-bit, 16-bit and float, each requested component count, flipped and not,
+from memory, from a reader and from a file at an offset, and the info,
+16-bit and HDR queries, each through the same three sources. GIFs are also
+loaded as animations, comparing every frame and every delay.
+
+### The inputs
+
+- The test images of other decoders, fetched as lazy dependencies at
+  pinned commits: stb's own tests (PngSuite and the iPhone PNGs),
+  jpeg-decoder's test images (with an image test suite of damaged JPEGs),
+  stb's and libjpeg-turbo's PGM and PPM files,
+  image-rs's PNG, JPEG, BMP (bmpsuite), GIF, TGA, HDR and PNM tests,
+  psd-tools' PSD and PSB files and libjpeg-turbo's test images.
+- Hand-made files from small encoders in each test file: every PNG colour
+  type, depth, filter and interlace; every BMP header size, depth and mask;
+  every TGA type and RLE packet; PSD channel counts and PackBits runs; PNM
+  maximum values and comment placements; every JPEG sampling combination,
+  restart interval, DNL and frame type; GIF code sizes, disposals and
+  interlace; HDR run forms; every PIC packet type. Each format also has
+  1×1 images, the largest dimensions the limits allow, damaged headers, and
+  every truncation.
+- Seeded fuzzing (below).
+
+### Fuzzing
+
+| fuzz test | cases |
+| --- | ---: |
+| short random inputs, against every format | 1,000 |
+| PNG | 3,000 |
+| zlib and raw DEFLATE streams | 1,500 |
+| baseline JPEG; progressive JPEG | 1,500 each |
+| BMP; TGA; PSD; PNM; PIC | 3,000 each |
+| GIF, first frame and every frame; HDR | 2,000 each |
+
+Each case mutates one seed input (bit flips, bytes and integers set to edge
+values, truncation, ranges deleted, repeated or inserted, runs of one
+value), picks a random request (bit depth, components, flip, unpremultiply,
+iPhone conversion, gamma and scale, source and file offset) and compares the
+load and the queries with the original. Case `i` of a test takes its seed
+from Wyhash of `i`, keyed by the test's recorded seed plus `N` from
+`-Dfuzz-seed=N` (0 by default, which runs the recorded cases).
+`-Dfuzz-replay=i` runs only case `i` of each fuzz test.
+
+### Malformed input and the original's unsafe cases
+
+`zig build sanitize` runs every test's calls to the original, and only the
+original, through a build of it with AddressSanitizer and
+UndefinedBehaviorSanitizer (the system clang), and lists the calls they
+flag in `zig-out/sanitize/report.txt`. Each call runs in a process of its
+own, so an overrun cannot corrupt the calls after it, and every call gets
+UndefinedBehaviorSanitizer's reports, which come once per source line per
+process.
+
+Where the original reads out of bounds, reads memory it never wrote,
+overflows an `int` or is otherwise undefined, the port returns an error of
+its own, the same in every build mode. [`parity.md`](parity.md) lists each
+case with its test. The tests check each refusal on hand-made inputs, and
+the fuzz tests list the generated cases the original is unsafe on
+(`test/*_unsafe.zig` and the lists in the test files), where they expect
+the refusal and do not compare. Where the original's result depends on
+memory it allocated but never wrote (a JPEG whose scans leave blocks
+unwritten), the tests run it with fresh allocations filled with three
+different bytes; if the results differ, the port must refuse.
+
+### Settings and threads
+
+stb_image has global settings and thread-local overrides (flip,
+unpremultiply, iPhone conversion). The port has the same in
+`stbi.settings`, and per call in `Options`. "settings: …" runs a scripted
+sequence of global and thread-local changes on two threads at once, on the
+port and the original, and compares the flags each thread sees. The
+decoders keep no state between calls.
+
+### Failed allocations
+
+Each format has a test that fails each allocation of a decode in turn, with
+`std.testing.checkAllAllocationFailures`, and checks that the decode returns
+`error.OutOfMemory` and frees everything. Every test runs on
+`std.testing.allocator`, which fails on leaks and double frees.
+
+### pow
+
+`test/pow_test.zig` compares the port's `pow` with the C library's on every
+8-bit input at the default gamma and at 10,000 random gammas, on every
+finite non-negative float at 1/2.2, on 10^7 random floats and 10^7 random
+doubles, and on the special values. All match bit for bit.
+
+### Build modes
+
+The tests run in ReleaseSafe by default; `-Dtest-optimize` selects another
+mode. The original is always built at `-O3`. On 12 November 2026 every test
+passed in ReleaseSafe on x86-64 Linux (glibc 2.44), with the JPEG tests in
+both `-Djpeg-idct` modes.
