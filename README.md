@@ -1,18 +1,18 @@
 # zig-stb-image
 
-Tracks stb_image 2.30 · Zig 0.17 · [status](STATUS.md)
-
-## What it is
-
-A Zig port of stb_image, Sean Barrett's single-file image loader from
-[stb](#licence-and-references). It decodes JPEG, PNG, TGA, BMP, PSD, GIF,
-HDR, PIC and PNM images to 8-bit, 16-bit or float samples, and gives the
-original's pixels and failure reasons. It is pure Zig, with no dependencies
-beyond the standard library.
+Ported from stb_image 2.30 (`a7d4c21`) · Zig 0.17.0 · [status](STATUS.md)
 
 This port is not affiliated with or reviewed by the original authors. Its
 code was written with AI assistance for Farhollow Games, and is only machine
 verified. See [the tests](doc/TESTING.md) and [parity with the original](doc/parity.md).
+
+## What it is
+
+A Zig port of stb_image, Sean Barrett's single-file image loader from stb.
+It decodes JPEG, PNG, TGA, BMP, PSD, GIF, HDR, PIC and PNM images to 8-bit,
+16-bit or float samples, and gives the original's pixels and failure
+reasons. It is pure Zig, with no dependencies beyond the standard library.
+The original is listed under [References](#references).
 
 ## Features
 
@@ -40,7 +40,7 @@ verified. See [the tests](doc/TESTING.md) and [parity with the original](doc/par
 zig fetch --save git+https://github.com/farhollowgames/zig-stb-image#main
 ```
 
-There is no release yet; this fetches `main`.
+There is no release yet; this fetches `main`. The package needs Zig 0.17.0.
 
 In `build.zig`:
 
@@ -49,8 +49,15 @@ const stb_image = b.dependency("stb_image", .{ .target = target, .optimize = opt
 exe.root_module.addImport("stb_image", stb_image.module("stb_image"));
 ```
 
-`-Djpeg=false`, `-Dpng=false` and so on leave a format out, as the
-original's `STBI_NO_*` switches do.
+### Build options
+
+The original's compile-time switches are build options, passed where the
+dependency is declared, such as `.png = false`:
+
+| option | original | effect |
+| --- | --- | --- |
+| `jpeg`, `png`, `bmp`, `tga`, `psd`, `gif`, `hdr`, `pic`, `pnm` | `STBI_NO_*`, `STBI_ONLY_*` | `false` leaves the format out, and it is never detected; each is on by default |
+| `jpeg-idct` | `STBI_NO_SIMD`, `STBI_SSE2` | `sse2` or `scalar`: which of the original's builds the JPEG decoder follows on damaged coefficients, where the two differ; `sse2` by default on x86-64, `scalar` elsewhere |
 
 ## Use
 
@@ -101,12 +108,22 @@ The reasons are in [`doc/parity.md`](doc/parity.md).
 - `pow` is glibc 2.44's (from Arm's optimized-routines), so float
   conversions match the original built against that glibc on x86-64.
 
-## Not included
+## Left out
 
-The parts of the original that are left out, each with its reason, are listed in
-[`STATUS.md`](STATUS.md), under "Left out".
+The parts of the original that are left out, each with its reason, are
+listed in [`STATUS.md`](STATUS.md#left-out-approved). In short:
 
-## Testing and benchmarks
+- Build switches Zig has no need for: `STBI_NO_FAILURE_STRINGS`,
+  `STBI_NO_STDIO`, `STBI_NO_LINEAR`, `STBI_SUPPORT_ZLIB` and `STBI_NO_ZLIB`
+  (Zig compiles only the functions a program calls), `STBI_NO_THREAD_LOCALS`,
+  `STBI_WINDOWS_UTF8` (Zig paths are UTF-8 on Windows already) and the C
+  linkage macros.
+- The NEON build of the JPEG IDCT, which the port does not follow.
+- Inputs on which the original reads or writes out of bounds, reads memory
+  it never wrote, never returns or is undefined: the port refuses them with
+  an error, each listed in `doc/parity.md` with its test.
+
+## Tests
 
 `zig build test` runs 182 tests. 171 run the original beside the port on
 the same inputs and compare their results: success, size, channels, every
@@ -123,42 +140,55 @@ the original passes a null pointer to `memcpy` for 0 bytes, and overflows
 in the scalar JPEG IDCT, whose build the port follows only with
 `-Djpeg-idct=scalar` (and then refuses them).
 
-Port time against original time, for a 960 x 720 photograph loaded from
-memory:
-
-| feature | port vs original |
-| --- | ---: |
-| PNG, 8-bit RGB | 22% faster |
-| JPEG 4:2:0 | 48% faster |
-| JPEG progressive | 3% faster |
-| BMP, 24-bit | about 25 times faster |
-| zlib inflate | 18% faster |
-
-No row of the full table is slower than the original; the closest are
-progressive JPEG and PNM (1% faster). AMD Ryzen 9 9950X3D, one thread,
-Linux 7.3.3, Zig 0.17.0 ReleaseFast against clang 22.1.8 `-O3` with the
-original's SSE2 paths, at commit `ac97ea4`, best of three runs on a busy
-machine (load average 6 to 20 on 32 hardware threads).
-
 - [`doc/TESTING.md`](doc/TESTING.md): how the tests compare the port with
   the original, and what this repository's tests cover.
-- [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md): ratios and full tables: every
-  feature, the flags on both sides, the biases and the command.
+- [`doc/parity.md`](doc/parity.md): where the port differs from the
+  original, and the test of each difference.
 
-## Licence and references
+## Speed
 
-The original's licence: MIT or public domain (the Unlicense), your choice
+Port time against original time, one thread, for a 960 x 720 photograph
+loaded from memory:
+
+| feature | time, port / original | port vs original |
+| --- | ---: | ---: |
+| PNG, 8-bit RGB | 0.78 | 22% faster |
+| JPEG 4:2:0 | 0.52 | 48% faster |
+| JPEG progressive | 0.97 | 3% faster |
+| BMP, 24-bit | 0.04 | 96% faster |
+| zlib inflate | 0.82 | 18% faster |
+
+No row of the full table is slower than the original; the closest are
+progressive JPEG (3% faster) and PNM (1% faster).
+
+AMD Ryzen 9 9950X3D, one thread, Linux 7.3.3, Zig 0.17.0 ReleaseFast against
+clang 22.1.8 `-O3` with the original's SSE2 paths, at commit `ac97ea4`;
+each side's best median of three rounds; a load average of 6 to 20 on 32
+hardware threads, from other builds.
+
+- [`doc/BENCHMARKS.md`](doc/BENCHMARKS.md): every feature, the flags on both
+  sides, the biases and the command.
+
+## Licence
+
+MIT or public domain (the Unlicense), your choice, as the original
 ([`LICENSE`](LICENSE)). zig-stb-image is an altered version of stb_image:
 the code is rewritten in Zig, with its own interface. The original's licence
 text and its notice, "Copyright (c) 2017 Sean Barrett", are kept in
-`LICENSE` as they are. `src/pow.zig` is translated from Arm's
-optimized-routines and is used under the MIT licence; its text and Arm's
-copyright notices are in `LICENSE` too.
+`LICENSE` as they are, beside "Copyright (c) 2026 Farhollow Games".
+`src/pow.zig` is translated from Arm's optimized-routines and is used under
+the MIT licence; its text and Arm's copyright notices are in `LICENSE` too.
+
+## References
 
 - [stb](https://github.com/nothings/stb), the original, by
   [Sean Barrett](https://github.com/nothings) and the stb_image
-  contributors.
+  contributors, commit `a7d4c21`, copied into `reference/` for the tests and
+  the benchmark only.
 - [optimized-routines](https://github.com/ARM-software/optimized-routines),
   Arm's maths routines, which glibc's `pow` and the port's are built from.
+- The test images, from the repositories of stb, jpeg-decoder, image-rs,
+  psd-tools and libjpeg-turbo, fetched as lazy dependencies for the tests
+  and the benchmark only.
 
 Made by Farhollow Games for the Loomwork Engine.
