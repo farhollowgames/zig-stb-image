@@ -2,6 +2,9 @@ const std = @import("std");
 
 const Format = enum { jpeg, png, bmp, tga, psd, gif, hdr, pic, pnm };
 
+/// The JPEG IDCT to compute: the original's scalar one, or its SSE2 one.
+const JpegIdct = enum { scalar, sse2 };
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -12,6 +15,12 @@ pub fn build(b: *std.Build) void {
         const enabled = b.option(bool, name, "Decode " ++ name ++ " (default true)") orelse true;
         format_options.addOption(bool, name, enabled);
     }
+    const jpeg_idct = b.option(
+        JpegIdct,
+        "jpeg-idct",
+        "The JPEG IDCT whose samples to give where the original's builds differ (default scalar)",
+    ) orelse .scalar;
+    format_options.addOption(JpegIdct, "jpeg_idct", jpeg_idct);
     const format_module = format_options.createModule();
 
     const stb_image = b.addModule("stb_image", .{

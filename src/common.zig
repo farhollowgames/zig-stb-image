@@ -128,6 +128,9 @@ pub const Source = struct {
     buffer_start: [128]u8 = undefined,
     /// Bytes taken from the reader before the current buffer.
     callback_already_read: usize = 0,
+    /// Bytes skips asked for past the reader's end. A `FILE` seeks past
+    /// its end there, so `loadFromFile` does too.
+    skipped_past_end: u64 = 0,
 
     base: [*]const u8 = undefined,
     pos: usize = 0,
@@ -244,9 +247,12 @@ pub const Source = struct {
             if (buffered < count) {
                 source.pos = source.end;
                 const rest = count - buffered;
-                _ = reader.discardShort(std.math.cast(usize, rest) orelse std.math.maxInt(usize)) catch {
+                const wanted = std.math.cast(usize, rest) orelse std.math.maxInt(usize);
+                const discarded = reader.discardShort(wanted) catch blk: {
                     source.read_failed = true;
+                    break :blk 0;
                 };
+                source.skipped_past_end +|= rest - discarded;
                 source.reader_eof = if (reader.peekByte()) |_| false else |_| true;
                 return;
             }

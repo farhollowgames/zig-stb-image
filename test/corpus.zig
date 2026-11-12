@@ -50,7 +50,9 @@ pub fn load(
 ) !Set {
     const base = try std.fs.path.join(gpa, &.{ rootPath(root), sub_dir });
     defer gpa.free(base);
-    var dir = try std.Io.Dir.openDirAbsolute(io, base, .{ .iterate = true });
+    // The dependency paths may be relative to the build root, where the
+    // tests run.
+    var dir = try std.Io.Dir.cwd().openDir(io, base, .{ .iterate = true });
     defer dir.close(io);
 
     var entries: std.ArrayList(Entry) = .empty;

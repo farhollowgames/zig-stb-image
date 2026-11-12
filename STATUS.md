@@ -42,9 +42,10 @@ picks it up; the git log has the detail.
 
 | format | upstream | zig-stb-image | tests | state |
 | --- | --- | --- | --- | --- |
-| JPEG baseline | `stbi__jpeg_*` | `src/jpeg.zig` | | not started |
-| JPEG progressive | as above | as above | | not started |
-| JPEG restart markers, DNL, Adobe and JFIF colour transforms, CMYK and YCCK | as above | as above | | not started |
+| JPEG baseline | `stbi__jpeg_*` | `src/jpeg.zig` | `test/jpeg_test.zig`: the jpeg-decoder, libjpeg-turbo and image-rs corpora; "every sampling factor combination the original accepts …", "sizes that are not whole blocks or MCUs …", "the frame types and table variants …", "faults in the frame header / tables / scan headers fail as in the original", "a JPEG cut short anywhere …", "fuzzed baseline JPEGs load as in the original" | oracle-tested |
+| JPEG progressive | as above | as above | as above, and "fuzzed progressive JPEGs load as in the original" | oracle-tested |
+| JPEG restart markers, DNL, Adobe and JFIF colour transforms, CMYK and YCCK | as above | as above | "restart intervals and every restart marker …", "a DNL segment …", "every colour model decodes as in the original" | oracle-tested |
+| JPEG IDCT of the SSE2 build | `stbi__idct_simd` | `-Djpeg-idct=sse2` | the JPEG suite run with `-Djpeg-idct=sse2`; "coefficients past 16 bits give the samples of the original build the port follows" | oracle-tested, awaiting the author's approval |
 | PNG 1, 2, 4, 8, 16 bits, every colour type, palettes, tRNS | `stbi__png_*` | `src/png.zig` | | not started |
 | PNG Adam7 interlace | as above | as above | | not started |
 | PNG iPhone CgBI, BGR conversion and unpremultiply | `stbi__de_iphone` | as above | | not started |
@@ -93,7 +94,7 @@ picks it up; the git log has the detail.
 | `STBI_SUPPORT_ZLIB`, `STBI_NO_ZLIB` | none: `zlib` is compiled only where used | awaiting the author's approval |
 | `STBI_MALLOC`, `STBI_REALLOC`, `STBI_REALLOC_SIZED`, `STBI_FREE` | the `std.mem.Allocator` each call takes | ported |
 | `STBI_ASSERT` | Zig's safety checks | ported |
-| `STBI_NO_SIMD`, `STBI_SSE2`, `STBI_NEON` | see "Left out" | awaiting the author's approval |
+| `STBI_NO_SIMD`, `STBI_SSE2`, `STBI_NEON` | `-Djpeg-idct=scalar` (default) or `sse2`: the JPEG IDCT whose samples to give where the two differ; no SIMD code yet (see "Left out") | awaiting the author's approval |
 | `STBI_NO_THREAD_LOCALS` | none: Zig has `threadlocal` on every target the port builds for | awaiting the author's approval |
 | `STBI_WINDOWS_UTF8`, `stbi_convert_wchar_to_utf8` | none: Zig paths are UTF-8 on Windows already | awaiting the author's approval |
 | `STB_IMAGE_STATIC`, `STBIDEF`, `STB_IMAGE_IMPLEMENTATION` | none: C linkage only | awaiting the author's approval |
@@ -101,3 +102,23 @@ picks it up; the git log has the detail.
 ## Left out (awaiting the author's approval)
 
 To be completed with the decoders.
+
+### JPEG
+
+Each case is described in `doc/parity.md`, with its tests.
+
+- Where the original reads sample or coefficient memory it never wrote
+  (missing or truncated scans, segments after the frame header it fails to
+  parse, restart intervals without their markers), the port refuses with
+  `error.JpegMissingScanData`.
+- Where the original's scalar IDCT overflows an `int` (undefined in C), the
+  scalar port refuses with `error.JpegIdctOverflow`. The corpus file
+  `imagetestsuite/b0b8914cc5f7a6eff409f16d8cc236c5.jpg` is one.
+- The original's SSE2 and scalar builds give other samples on coefficients
+  past 16 bits; `-Djpeg-idct` picks the one the port follows (scalar by
+  default). The NEON build is not followed.
+- The SIMD code of the SSE2 build (IDCT, YCbCr conversion, 2x2 upsampling)
+  is computed with scalar code that gives its results; vector code waits for
+  the performance pass.
+- Arithmetic-coded (SOF9 to SOF15), lossless (SOF3) and 12-bit JPEGs are
+  refused as the original refuses them.

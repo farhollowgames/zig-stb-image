@@ -7,4 +7,5 @@ const oracle = @import("oracle.zig");
 
 test {
     _ = @import("core_test.zig");
+    _ = @import("jpeg_test.zig");
 }

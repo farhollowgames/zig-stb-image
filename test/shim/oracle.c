@@ -10,6 +10,32 @@
 #include <string.h>
 #include <unistd.h>
 
+/* The original's allocations. While `malloc_fill` is 0 to 255, each new
+   block (and each block's growth) is filled with it first, so a test can
+   tell a result that depends on memory the original never wrote: it
+   changes with the fill. */
+static int malloc_fill = -1;
+
+static void *oracle_malloc(size_t size)
+{
+   void *p = malloc(size);
+   if (p && malloc_fill >= 0) memset(p, malloc_fill, size);
+   return p;
+}
+
+static void *oracle_realloc(void *p, size_t old_size, size_t new_size)
+{
+   unsigned char *q = (unsigned char *) realloc(p, new_size);
+   if (q && malloc_fill >= 0 && new_size > old_size)
+      memset(q + old_size, malloc_fill, new_size - old_size);
+   return q;
+}
+
+#define STBI_MALLOC(size) oracle_malloc(size)
+#define STBI_REALLOC(p, size) realloc(p, size)
+#define STBI_REALLOC_SIZED(p, old_size, new_size) oracle_realloc(p, old_size, new_size)
+#define STBI_FREE(p) free(p)
+
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -140,6 +166,13 @@ void F(load_gif)(const unsigned char *bytes, size_t len, const oracle_settings *
 void F(free)(void *p)
 {
    STBI_FREE(p);
+}
+
+/* fill: 0 to 255 fills every allocation of the original with it; -1 leaves
+   allocations as malloc gives them. */
+void F(set_malloc_fill)(int fill)
+{
+   malloc_fill = fill;
 }
 
 /* What: 0 info, 1 is_16_bit, 2 is_hdr. Returns the call's result. */

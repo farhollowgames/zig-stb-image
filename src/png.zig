@@ -5,8 +5,16 @@ const common = @import("common.zig");
 
 const Source = common.Source;
 
+/// Until PNG is ported: only `stbi__check_png_header`'s failure reason,
+/// which later failures of other formats report.
 pub fn detect(source: *Source) bool {
-    _ = source;
+    for ([_]u8{ 137, 80, 78, 71, 13, 10, 26, 10 }) |byte| {
+        if (source.get8() != byte) {
+            source.reason = error.BadPngSignature;
+            break;
+        }
+    }
+    source.rewind();
     return false;
 }
 

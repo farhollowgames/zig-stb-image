@@ -45,6 +45,8 @@ pub const upstream = struct {
     pub extern fn simd_load_gif(bytes: [*]const u8, len: usize, settings: *const Settings, out: *Result) void;
     pub extern fn scalar_load_gif(bytes: [*]const u8, len: usize, settings: *const Settings, out: *Result) void;
     pub extern fn simd_free(p: ?*anyopaque) void;
+    pub extern fn simd_set_malloc_fill(fill: c_int) void;
+    pub extern fn scalar_set_malloc_fill(fill: c_int) void;
     pub extern fn scalar_free(p: ?*anyopaque) void;
     pub extern fn simd_query(bytes: [*]const u8, len: usize, what: c_int, settings: *const Settings, out: *Result) c_int;
     pub extern fn scalar_query(bytes: [*]const u8, len: usize, what: c_int, settings: *const Settings, out: *Result) c_int;
@@ -252,10 +254,101 @@ pub const Expect = enum {
     /// The original reads out of bounds or is undefined on this input (the
     /// sanitizer run finds these): the port must refuse it.
     port_refuses,
+    /// As `same`, unless the original's result depends on memory it
+    /// allocated and never wrote (it changes with what fresh allocations
+    /// hold, see `readsUnwritten`): then the port must refuse the input.
+    same_unless_unwritten,
 };
 
+fn setMallocFill(path: Path, fill: c_int) void {
+    switch (path) {
+        .simd => upstream.simd_set_malloc_fill(fill),
+        .scalar => upstream.scalar_set_malloc_fill(fill),
+    }
+}
+
+/// Whether the original's result for `request` depends on memory it
+/// allocated and never wrote: whether either build gives another result,
+/// failure reason or file position when every allocation is filled with
+/// 0x00 than when it is filled with 0xff.
+fn readsUnwritten(bytes: []const u8, request: Request, mem_file: ?MemFile) bool {
+    var settings = request.settings();
+    for ([_]Path{ .simd, .scalar }) |path| {
+        var results: [2]Result = undefined;
+        for (&results, [_]c_int{ 0x00, 0xff }) |*result, fill| {
+            if (mem_file) |m| {
+                m.seek(request.file_offset);
+                settings.fd = m.fd;
+            }
+            setMallocFill(path, fill);
+            loadFn(path)(bytes.ptr, bytes.len, bitsArg(request.bits), &settings, result);
+            setMallocFill(path, -1);
+        }
+        defer for (results) |result| freeFn(path)(result.pixels);
+        const a = results[0];
+        const b = results[1];
+        if ((a.pixels == null) != (b.pixels == null)) return true;
+        if (a.pos_after != b.pos_after) return true;
+        if (a.pixels == null) {
+            const reason_a = std.mem.span(a.reason orelse "");
+            const reason_b = std.mem.span(b.reason orelse "");
+            if (!std.mem.eql(u8, reason_a, reason_b)) return true;
+            continue;
+        }
+        if (a.x != b.x or a.y != b.y or a.comp != b.comp) return true;
+        const req: u32 = request.options.reqComp();
+        const comp: u32 = if (req != 0) req else @intCast(a.comp);
+        const len = @as(usize, @intCast(a.x)) * @as(usize, @intCast(a.y)) * comp *
+            sampleSize(request.bits);
+        const pixels_a: [*]const u8 = @ptrCast(a.pixels.?);
+        const pixels_b: [*]const u8 = @ptrCast(b.pixels.?);
+        if (!std.mem.eql(u8, pixels_a[0..len], pixels_b[0..len])) return true;
+    }
+    return false;
+}
+
+/// The build of the original the port follows where the two give different
+/// results, which only the JPEG decoder's IDCT can make (see
+/// `stbi.jpeg_idct`).
+const followed_path: Path = switch (stbi.jpeg_idct) {
+    .scalar => .scalar,
+    .sse2 => .simd,
+};
+
+/// Whether the two builds of the original give different results for
+/// `bytes` loaded from memory as `request` says.
+pub fn originalBuildsDisagree(bytes: []const u8, request: Request) bool {
+    std.debug.assert(request.via != .file);
+    const paths = [_]Path{ .simd, .scalar };
+    var results: [2]Result = undefined;
+    const settings = request.settings();
+    for (paths, &results) |path, *theirs| {
+        loadFn(path)(bytes.ptr, bytes.len, bitsArg(request.bits), &settings, theirs);
+    }
+    defer for (paths, results) |path, theirs| freeFn(path)(theirs.pixels);
+    return buildsDisagree(results, request);
+}
+
+/// Whether the two builds of the original give different results: one
+/// decodes and the other fails, or they decode to other sizes or bytes.
+fn buildsDisagree(results: [2]Result, request: Request) bool {
+    const a = results[0];
+    const b = results[1];
+    if ((a.pixels == null) != (b.pixels == null)) return true;
+    if (a.pixels == null) return false;
+    if (a.x != b.x or a.y != b.y or a.comp != b.comp) return true;
+    const req: u32 = request.options.reqComp();
+    const comp: u32 = if (req != 0) req else @intCast(a.comp);
+    const len = @as(usize, @intCast(a.x)) * @as(usize, @intCast(a.y)) * comp *
+        sampleSize(request.bits);
+    const pixels_a: [*]const u8 = @ptrCast(a.pixels.?);
+    const pixels_b: [*]const u8 = @ptrCast(b.pixels.?);
+    return !std.mem.eql(u8, pixels_a[0..len], pixels_b[0..len]);
+}
+
 /// Loads `bytes` with both builds of the original and the port, and fails
-/// on any difference.
+/// on any difference. Where the two builds differ from each other, the port
+/// is held to the one it follows.
 pub fn expectLoadSame(
     gpa: std.mem.Allocator,
     bytes: []const u8,
@@ -274,24 +367,35 @@ pub fn expectLoadSame(
         .failure => {},
     };
 
-    if (expect == .port_refuses) {
+    const refuse = switch (expect) {
+        .same => false,
+        .port_refuses => true,
+        .same_unless_unwritten => readsUnwritten(bytes, request, mem_file),
+    };
+    if (refuse) {
         if (port == .image) {
-            label.print(request, "the port decoded an input the original is unsafe on", .{});
+            const what = if (expect == .port_refuses) "is unsafe on" else "reads unwritten memory on";
+            label.print(request, "the port decoded an input the original {s}", .{what});
             return error.TestUnexpectedResult;
         }
         return;
     }
 
+    const paths = [_]Path{ .simd, .scalar };
+    var results: [2]Result = undefined;
     var settings = request.settings();
-    for ([_]Path{ .simd, .scalar }) |path| {
+    for (paths, &results) |path, *theirs| {
         if (mem_file) |m| {
             m.seek(request.file_offset);
             settings.fd = m.fd;
         }
-        var theirs: Result = undefined;
-        loadFn(path)(bytes.ptr, bytes.len, bitsArg(request.bits), &settings, &theirs);
-        defer freeFn(path)(theirs.pixels);
+        loadFn(path)(bytes.ptr, bytes.len, bitsArg(request.bits), &settings, theirs);
+    }
+    defer for (paths, results) |path, theirs| freeFn(path)(theirs.pixels);
+    const disagree = buildsDisagree(results, request);
 
+    for (paths, results) |path, theirs| {
+        if (disagree and path != followed_path) continue;
         switch (port) {
             .failure => |err| {
                 if (theirs.pixels != null) {
@@ -431,19 +535,25 @@ pub fn expectQuerySame(
 /// component count from memory, flipped and not, and a sample through the
 /// reader and from a file.
 pub fn expectAllSame(gpa: std.mem.Allocator, bytes: []const u8, label: Label) !void {
+    return expectAll(gpa, bytes, label, .same);
+}
+
+/// As `expectAllSame`, with every load expected as `expect` says; the
+/// queries are always compared.
+pub fn expectAll(gpa: std.mem.Allocator, bytes: []const u8, label: Label, expect: Expect) !void {
     for ([_]Bits{ .u8, .u16, .f32 }) |bits| {
         for (0..5) |comp| {
             try expectLoadSame(gpa, bytes, .{
                 .bits = bits,
                 .options = .{ .components = @fromBackingInt(@as(u3, @intCast(comp))) },
-            }, label, .same);
+            }, label, expect);
         }
         try expectLoadSame(gpa, bytes, .{
             .bits = bits,
             .options = .{ .flip_vertically = true },
-        }, label, .same);
-        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .callbacks }, label, .same);
-        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .file, .file_offset = 3 }, label, .same);
+        }, label, expect);
+        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .callbacks }, label, expect);
+        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .file, .file_offset = 3 }, label, expect);
     }
     for ([_]Query{ .info, .is_16_bit, .is_hdr }) |query| {
         for ([_]Via{ .memory, .callbacks, .file }) |via| try expectQuerySame(bytes, query, via, label);

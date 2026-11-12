@@ -25,6 +25,9 @@ pub const Config = struct {
     /// Cases the original is unsafe on, found by `zig build sanitize` with
     /// the default `-Dfuzz-seed`; the port must refuse them.
     unsafe: []const Unsafe = &.{},
+    /// Where the original's result depends on memory it never wrote, the
+    /// port must refuse the case (`oracle.Expect.same_unless_unwritten`).
+    refuse_unwritten: bool = false,
 };
 
 pub const Case = struct {
@@ -184,7 +187,12 @@ pub fn run(gpa: std.mem.Allocator, config: Config, inputs: []const []const u8) !
             .seed = config.seed +% fuzz_options.fuzz_seed,
             .case = case_number,
         };
-        const load_expect: oracle.Expect = if (unsafeCall(config, case_number, .load)) .port_refuses else .same;
+        const load_expect: oracle.Expect = if (unsafeCall(config, case_number, .load))
+            .port_refuses
+        else if (config.refuse_unwritten)
+            .same_unless_unwritten
+        else
+            .same;
         try oracle.expectLoadSame(gpa, case.bytes, case.request, label, load_expect);
         if (!unsafeCall(config, case_number, .info)) {
             try oracle.expectQuerySame(case.bytes, .info, .memory, label);

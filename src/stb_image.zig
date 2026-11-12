@@ -38,6 +38,15 @@ pub const formats = struct {
     pub const pnm = build_options.pnm;
 };
 
+/// The IDCT the JPEG decoder computes, from `-Djpeg-idct`. The original
+/// computes it two ways: `scalar`, as built with `STBI_NO_SIMD` or for
+/// targets without SSE2, and `sse2`, as built for x86 with SSE2. Both give
+/// the same samples unless a block's coefficients need more than 16 bits
+/// between the passes, which only damaged files have; there the original's
+/// two builds differ, and the port gives the samples of the one named. Where
+/// the scalar one overflows an `int`, the `scalar` port refuses the image.
+pub const jpeg_idct = build_options.jpeg_idct;
+
 const jpeg = if (formats.jpeg) @import("jpeg.zig") else Missing;
 const png = if (formats.png) @import("png.zig") else Missing;
 const bmp = if (formats.bmp) @import("bmp.zig") else Missing;
@@ -134,13 +143,24 @@ pub fn loadFromFile(
     comptime checkSample(T);
     var source: Source = undefined;
     source.initReader(&file_reader.interface);
-    var image = try loadSource(T, gpa, &source, &options);
+    var image = loadSource(T, gpa, &source, &options) catch |err| {
+        try seekPastEnd(file_reader, &source);
+        return err;
+    };
+    errdefer image.deinit(gpa);
+    try seekPastEnd(file_reader, &source);
     if (T != f32) {
-        errdefer image.deinit(gpa);
         // Give back what the source buffered but did not use.
         try file_reader.seekBy(-@as(i64, @intCast(source.end - source.pos)));
     }
     return image;
+}
+
+/// Where the decoder skipped past the end of the file, the original's
+/// `fseek` leaves the file there; so does the port.
+fn seekPastEnd(file_reader: *std.Io.File.Reader, source: *const Source) FileError!void {
+    if (source.skipped_past_end == 0) return;
+    try file_reader.seekBy(std.math.cast(i64, source.skipped_past_end) orelse std.math.maxInt(i64));
 }
 
 pub const PathError = FileError || std.Io.File.OpenError;

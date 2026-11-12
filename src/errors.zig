@@ -66,6 +66,12 @@ pub const Error = error{
     JpegBadHuffmanCode,
     JpegBadHuffmanLength,
     JpegDelayedHeight,
+    /// Not in the original: its integer IDCT overflows an `int`, which C
+    /// leaves undefined.
+    JpegIdctOverflow,
+    /// Not in the original: pixels no scan decoded, which the original
+    /// takes from memory it never wrote.
+    JpegMissingScanData,
     JpegOnly8Bit,
     MissingGifColorTable,
     MultipleIhdr,
@@ -221,6 +227,8 @@ fn strings(err: Error) [2][]const u8 {
             "no header height",
             "JPEG format not supported: delayed height",
         },
+        error.JpegIdctOverflow => .{ "IDCT overflow", "Corrupt JPEG" },
+        error.JpegMissingScanData => .{ "missing scan data", "Corrupt JPEG" },
         error.JpegOnly8Bit => .{ "only 8-bit", "JPEG format not supported: 8-bit only" },
         error.MissingGifColorTable => .{ "missing color table", "Corrupt GIF" },
         error.MultipleIhdr => .{ "multiple IHDR", "Corrupt PNG" },
