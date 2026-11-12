@@ -10,6 +10,8 @@ const postprocess = @import("postprocess.zig");
 
 pub const settings = @import("settings.zig");
 pub const zlib = @import("zlib.zig");
+/// The C library's double `pow`, as the float conversions compute it.
+pub const pow = @import("pow.zig").pow;
 
 pub const Error = errors.Error;
 pub const failureReason = errors.failureReason;
