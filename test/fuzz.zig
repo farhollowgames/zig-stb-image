@@ -1,7 +1,7 @@
 //! Seeded fuzzing: each case mutates one input of a seed set and picks a
 //! random request, from a generator seeded by the test's seed and the case
-//! number alone, so `tools/fuzz_cases.zig` writes out the very cases the
-//! tests run, for the sanitizer build of the original.
+//! number alone, so `zig build sanitize` runs the very cases the tests run
+//! through the sanitizer build of the original.
 
 const std = @import("std");
 const stbi = @import("stb_image");
@@ -162,7 +162,7 @@ pub fn randomRequest(rng: std.Random) oracle.Request {
 }
 
 fn unsafeCall(config: Config, case: u32, call: Call) bool {
-    if (fuzz_options.fuzz_seed != 0) return false;
+    if (fuzz_options.fuzz_seed != 0 or fuzz_options.sanitize) return false;
     for (config.unsafe) |entry| {
         if (entry.case == case and entry.call == call) return true;
     }

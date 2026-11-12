@@ -64,12 +64,46 @@ pub fn build(b: *std.Build) void {
     }
     if (!have_corpora) return;
 
-    const fuzz_options = b.addOptions();
-    fuzz_options.addOption(u64, "fuzz_seed", fuzz_seed);
-    fuzz_options.addOption(?u64, "fuzz_replay", fuzz_replay);
+    const corpus_module = corpus_paths.createModule();
+    const differential = differentialTest(b, target, test_optimize, test_module, corpus_module, .{
+        .filters = test_filters,
+        .fuzz_seed = fuzz_seed,
+        .fuzz_replay = fuzz_replay,
+        .sanitize = false,
+    });
+    differential.root_module.linkLibrary(oracleLibrary(b, target, .simd));
+    differential.root_module.linkLibrary(oracleLibrary(b, target, .scalar));
+    test_step.dependOn(&b.addRunArtifact(differential).step);
 
-    const differential = b.addTest(.{
-        .name = "differential",
+    addSanitize(b, target, test_optimize, test_module, corpus_module, .{
+        .filters = test_filters,
+        .fuzz_seed = fuzz_seed,
+        .fuzz_replay = fuzz_replay,
+        .sanitize = true,
+    });
+}
+
+const TestConfig = struct {
+    filters: []const []const u8,
+    fuzz_seed: u64,
+    fuzz_replay: ?u64,
+    sanitize: bool,
+};
+
+fn differentialTest(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    test_optimize: std.lang.Optimize,
+    test_module: *std.Build.Module,
+    corpus_module: *std.Build.Module,
+    config: TestConfig,
+) *std.Build.Step.Compile {
+    const fuzz_options = b.addOptions();
+    fuzz_options.addOption(u64, "fuzz_seed", config.fuzz_seed);
+    fuzz_options.addOption(?u64, "fuzz_replay", config.fuzz_replay);
+    fuzz_options.addOption(bool, "sanitize", config.sanitize);
+    return b.addTest(.{
+        .name = if (config.sanitize) "differential-sanitize" else "differential",
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/all.zig"),
             .target = target,
@@ -77,15 +111,77 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "stb_image", .module = test_module },
-                .{ .name = "corpus_paths", .module = corpus_paths.createModule() },
+                .{ .name = "corpus_paths", .module = corpus_module },
                 .{ .name = "fuzz_options", .module = fuzz_options.createModule() },
             },
         }),
-        .filters = test_filters,
+        .filters = config.filters,
     });
-    differential.root_module.linkLibrary(oracleLibrary(b, target, .simd));
-    differential.root_module.linkLibrary(oracleLibrary(b, target, .scalar));
-    test_step.dependOn(&b.addRunArtifact(differential).step);
+}
+
+/// `zig build sanitize`: every test's calls to the original, through the
+/// original built by the system clang with AddressSanitizer and
+/// UndefinedBehaviorSanitizer (recovering, so one run reports every case),
+/// and a report of the calls a sanitizer flagged in
+/// zig-out/sanitize/report.txt, with the full log beside it. The port is
+/// not run. Needs clang with its sanitizer runtimes on the PATH.
+fn addSanitize(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    test_optimize: std.lang.Optimize,
+    test_module: *std.Build.Module,
+    corpus_module: *std.Build.Module,
+    config: TestConfig,
+) void {
+    const step = b.step("sanitize", "Run every test's inputs through the original under ASan and UBSan");
+    const sanitize_flags = [_][]const u8{
+        "-O1",
+        "-g",
+        "-fPIC",
+        "-fno-omit-frame-pointer",
+        "-fsanitize=address,undefined",
+        "-fsanitize-recover=address,undefined",
+        "-std=c99",
+        "-D_GNU_SOURCE",
+        "-ffp-contract=off",
+    };
+    const link = b.addSystemCommand(&.{
+        "clang",
+        "-shared",
+        "-shared-libasan",
+        "-fsanitize=address,undefined",
+        "-o",
+    });
+    const shared = link.addOutputFileArg("libstb_image_sanitize.so");
+    for ([_][]const []const u8{
+        &.{"-DORACLE_PREFIX=simd"},
+        &.{ "-DORACLE_PREFIX=scalar", "-DSTBI_NO_SIMD", "-DSTBI_FAILURE_USERMSG" },
+    }, [_][]const u8{ "simd", "scalar" }) |path_flags, name| {
+        const cc = b.addSystemCommand(&.{ "clang", "-c" });
+        cc.addArgs(&sanitize_flags);
+        cc.addArgs(path_flags);
+        cc.addPrefixedDirectoryArg("-I", b.path("reference"));
+        cc.addFileArg(b.path("test/shim/oracle.c"));
+        cc.addArg("-o");
+        link.addFileArg(cc.addOutputFileArg(b.fmt("oracle_{s}.o", .{name})));
+    }
+
+    const differential = differentialTest(b, target, test_optimize, test_module, corpus_module, config);
+    differential.root_module.addObjectFile(shared);
+    differential.root_module.addRPath(shared.dirname());
+
+    const run = b.addSystemCommand(&.{"sh"});
+    run.addFileArg(b.path("tools/sanitize.sh"));
+    run.addArtifactArg(differential);
+    const out = run.addOutputDirectoryArg("sanitize");
+    run.has_side_effects = true;
+    run.stdio = .inherit;
+    const install = b.addInstallDirectory(.{
+        .source_dir = out,
+        .install_dir = .prefix,
+        .install_subdir = "sanitize",
+    });
+    step.dependOn(&install.step);
 }
 
 const corpora = [_][]const u8{ "stb", "jpeg_decoder", "image_rs", "psd_tools", "libjpeg_turbo" };

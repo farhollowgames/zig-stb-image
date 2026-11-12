@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const stbi = @import("stb_image");
+const fuzz_options = @import("fuzz_options");
 
 pub const Bits = enum { u8, u16, f32 };
 pub const Via = enum(c_int) { memory = 0, callbacks = 1, file = 2 };
@@ -262,6 +263,7 @@ pub fn expectLoadSame(
     label: Label,
     expect: Expect,
 ) !void {
+    if (fuzz_options.sanitize) return sanitizeCall(bytes, request, label, "load", .load);
     const mem_file: ?MemFile = if (request.via == .file) try MemFile.init(bytes, request.file_offset) else null;
     defer if (mem_file) |m| m.deinit();
 
@@ -362,6 +364,7 @@ pub fn expectQuerySame(
     label: Label,
 ) !void {
     const request: Request = .{ .via = via };
+    if (fuzz_options.sanitize) return sanitizeCall(bytes, request, label, @tagName(query), .{ .query = query });
     const mem_file: ?MemFile = if (via == .file) try MemFile.init(bytes, 0) else null;
     defer if (mem_file) |m| m.deinit();
 
@@ -463,6 +466,7 @@ pub fn expectGifSame(
     label: Label,
 ) !void {
     const request: Request = .{ .options = options };
+    if (fuzz_options.sanitize) return sanitizeCall(bytes, request, label, "gif", .gif);
     const settings = request.settings();
     const port = stbi.loadGifFromMemory(gpa, bytes, options);
     defer if (port) |animation| {
@@ -518,6 +522,49 @@ pub fn expectGifSame(
                 });
                 return error.TestUnexpectedResult;
             }
+        }
+    }
+}
+
+const SanitizeCall = union(enum) { load, query: Query, gif };
+
+/// Under `zig build sanitize`: names the call on stderr, then runs only the
+/// original, built with AddressSanitizer and UndefinedBehaviorSanitizer,
+/// whose reports follow the name. `tools/sanitize.sh` pairs them up.
+fn sanitizeCall(
+    bytes: []const u8,
+    request: Request,
+    label: Label,
+    call_name: []const u8,
+    call: SanitizeCall,
+) !void {
+    std.debug.print("stbi-case: {s} seed {?d} case {?d} call {s} | {t} via {t} components {t} flip {}\n", .{
+        label.name,
+        label.seed,
+        label.case,
+        call_name,
+        request.bits,
+        request.via,
+        request.options.components,
+        request.options.flip_vertically,
+    });
+    // Files go through memory here: the original reads them as it reads
+    // callbacks, and the sanitizer run needs no descriptors.
+    var settings = request.settings();
+    if (request.via == .file) settings.via = @backingInt(Via.callbacks);
+    for ([_]Path{ .simd, .scalar }) |path| {
+        var theirs: Result = undefined;
+        switch (call) {
+            .load => {
+                loadFn(path)(bytes.ptr, bytes.len, bitsArg(request.bits), &settings, &theirs);
+                freeFn(path)(theirs.pixels);
+            },
+            .query => |query| _ = queryFn(path)(bytes.ptr, bytes.len, @backingInt(query), &settings, &theirs),
+            .gif => {
+                loadGifFn(path)(bytes.ptr, bytes.len, &settings, &theirs);
+                freeFn(path)(theirs.pixels);
+                freeFn(path)(@ptrCast(theirs.delays));
+            },
         }
     }
 }
