@@ -19,4 +19,5 @@ test {
     _ = @import("psd_test.zig");
     _ = @import("pnm_test.zig");
     _ = @import("jpeg_test.zig");
+    _ = @import("skeptic_probes.zig");
 }
