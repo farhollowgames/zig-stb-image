@@ -84,8 +84,10 @@ performance pass, the skeptic's review, the fixes) are not started.
   whose message gives its benchmark gain; the oracle tests are not edited
   for speed.
 - **Performance: JPEG** (`perf/jpeg`). Time port / original SSE2, best
-  of 3, `zig build bench -- --filter jpeg --rounds 3`: 4:4:4 0.70, 4:2:0
-  0.52, 4:2:0 to rgba 0.95, grey 0.52, progressive 0.93, ycck 0.74. Done:
+  of 3, full run at the end: 4:4:4 0.70, 4:2:0 0.52, 4:2:0 to rgba 0.96,
+  grey 0.52, progressive 0.92, ycck 0.73; every row below the original's
+  SSE2 build. The full test run passes (167 tests); the JPEG tests pass
+  in both `-Djpeg-idct` modes. Done:
   the SSE2-mode IDCT on `@Vector` lanes; `-Djpeg-idct` defaults to `sse2`
   on x86-64; `@Vector` YCbCr to RGB/RGBA with the YCCK blend; `@Vector`
   2x2 (hv_2) upsampling; the bit reader's refill takes up to four bytes at
@@ -94,17 +96,13 @@ performance pass, the skeptic's review, the fixes) are not started.
   (`-Djpeg-idct=scalar`) on eight lanes where no step can overflow (that
   mode: 4:4:4 0.73, 4:2:0 0.55, rgba 1.02, grey 0.55, progressive 0.94,
   ycck 0.79 against the SSE2 build; 0.36 to 0.66 against the scalar
-  build). Tried and
-  dropped (no gain): the grey row as a `@memcpy`; the refill's fast path
-  inlined; a DC-only block filled without the IDCT; the component buffers
-  left unzeroed. Next
-  (rgba is the one row near 1: the port's RGBA costs what its RGB does, so
-  the decode itself must get faster): Huffman and per-block overhead, the
-  scalar IDCT on vectors where no step can overflow. Resume: measure a
-  change with the filtered bench in the same session before and after;
-  run `test -Dtest-filter=jpeg` in both `-Djpeg-idct` modes; at the end
-  update `doc/BENCHMARKS.md`'s JPEG bias and README's `-Djpeg-idct` line
-  (the lead's).
+  build). Tried and dropped (no gain): the grey row as a `@memcpy`; the
+  refill's fast path inlined; a DC-only block filled without the IDCT; the
+  component buffers left unzeroed. Left, if more is wanted: rgba (0.96)
+  and progressive (0.92) are the closest rows; the port's RGBA costs what
+  its RGB does, so only a faster decode helps them (the progressive AC
+  loops could keep the bit buffer in locals as the baseline one does).
+  README's `-Djpeg-idct` line still says scalar by default (the lead's).
 - **Left to do:**
   1. Step 5, the performance pass, by an agent that did not write the port,
      on branch `review/perf-and-skeptic`. Zig 0.17 never vectorizes loops,

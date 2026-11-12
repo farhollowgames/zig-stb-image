@@ -94,12 +94,15 @@ median time over the original's, so below 1 is faster.
 
 ## Known biases and slower rows
 
-- **JPEG.** The port does not have the original's SSE2 code yet: its IDCT,
-  YCbCr conversion and 2x2 upsampling are scalar, and Zig 0.17 does not
-  vectorize loops by itself. Against the original without SIMD the port is
-  within a few percent; against the SSE2 build it is about 1.5 times slower,
-  and 2.8 times on RGBA output, where the original converts YCbCr straight
-  to four channels with SSE2.
+- **JPEG.** The table above predates the port's vector code. The port
+  now computes the IDCT, the YCbCr conversion (to three and four channels,
+  and YCCK) and the 2x2 upsampling on `@Vector` lanes, and builds the SSE2
+  IDCT by default on x86-64. A full run, best of 3, on 12 November 2026
+  gave on the JPEG rows, time port / original SSE2: 4:4:4 0.70, 4:2:0
+  0.52, 4:2:0 to rgba 0.96, grey 0.52, progressive 0.92, ycck 0.73
+  (against the original without SIMD 0.33 to 0.66). Much of the lead on RGB output is the original's scalar conversion
+  to three channels, which its SSE2 code leaves out; to RGBA, which the
+  SSE2 code converts, the two are close.
 - **BMP and PSD.** The original's per-pixel loops compile to vector code at
   -O3; the port's do not yet.
 - **PNG palette.** The palette expansion is scalar in the port.
