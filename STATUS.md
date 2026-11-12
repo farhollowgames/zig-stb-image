@@ -117,24 +117,24 @@ performance pass, the skeptic's review, the fixes) are not started.
 
 On branch `perf/png` (worktree `~/Projects/zig-stb-image.wt/perf-png`).
 Rows' ratios now (port time / original SSE2 time, best of 3 rounds): zlib
-inflate 0.82; png rgb 0.85, rgba 0.84, grey 0.92, rgb 16-bit 0.91, adam7
-0.85, palette 1.11, rgb to rgba 0.88, rgb to float 0.93.
+inflate 0.82; png rgb 0.81, rgba 0.83, grey 0.69, rgb 16-bit 0.82, adam7
+0.79, palette 0.90, rgb to rgba 0.81, rgb to float 0.90.
 
 - **Kept:** inflate's Huffman loop keeps its bit buffer in locals and fills
-  it with one 32-bit load.
-- **Dropped:** copying matches eight bytes at a time (no measurable gain).
-- **In progress (work-in-progress commit, not yet tested or measured):**
-  row unfiltering a pixel at a time as `@Vector(bpp, u8)` for each byte
-  depth (`unfilterPixels` in `src/png.zig`), with a vector Paeth and
-  32-byte `up`. Next: run the PNG tests and the PNG bench rows; keep it
-  only if they pass and gain, else revert that commit.
-- **Left:** palette expansion (a draft that checks the largest index once
-  and copies entries as 4-byte words is in the scratchpad as
-  `perf-png/palette_edit.py`); the 16-bit byte swap; the RGB-to-RGBA alpha
-  expansion; unfiltering straight into the image to drop the row copy.
+  it with one 32-bit load; rows unfilter a pixel at a time per pixel size
+  (`unfilterPixels`, `predictPixels`, `paethPixels` in `src/png.zig`).
+- **Dropped:** copying matches eight bytes at a time (no measurable gain);
+  Paeth as vectors for 3-byte pixels, and as scalars for every size.
+- **Left:** palette expansion (check the largest index once, copy entries
+  as 4-byte words); the 16-bit byte swap as vectors; the RGB-to-RGBA alpha
+  expansion as shuffles; unfiltering straight into the image to drop the
+  row copy; `decodeAlloc`'s shrinking `realloc` costs nothing with the C
+  allocator (an in-place shrink), and the 1 MiB IDAT pieces are left.
 - **Resume:** `zig build bench -- --filter png --rounds 3` (and `--filter
   zlib`) through the build wrapper; tests with `-Dtest-filter=zlib
-  -Dtest-filter=png -Dtest-filter=PNG -Dtest-filter=DEFLATE`.
+  -Dtest-filter=png -Dtest-filter=PNG -Dtest-filter=DEFLATE`. Rows of one
+  filter each help: a local, uncommitted bench change can force
+  `filterRows`'s filter.
 
 ## Formats
 

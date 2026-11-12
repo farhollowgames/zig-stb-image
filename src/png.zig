@@ -617,8 +617,7 @@ fn unfilter(
     }
 }
 
-/// `unfilter` for `bpp`-byte pixels, a pixel at a time: rows hold whole
-/// pixels, and each pixel depends on the one on its left.
+/// `unfilter` for `bpp`-byte pixels.
 fn unfilterPixels(
     comptime bpp: usize,
     filter: Filter,
@@ -626,76 +625,138 @@ fn unfilterPixels(
     prior: []const u8,
     in: []const u8,
 ) void {
-    const Pixel = @Vector(bpp, u8);
-    const nk = cur.len;
     switch (filter) {
         .none => @memcpy(cur, in),
-        .sub => {
-            var a: Pixel = in[0..bpp].*;
-            cur[0..bpp].* = a;
-            var k: usize = bpp;
-            while (k < nk) : (k += bpp) {
-                a +%= @as(Pixel, in[k..][0..bpp].*);
-                cur[k..][0..bpp].* = a;
-            }
-        },
         .up => {
             const lanes = 32;
             var k: usize = 0;
-            while (nk - k >= lanes) : (k += lanes) {
+            while (cur.len - k >= lanes) : (k += lanes) {
                 const i: @Vector(lanes, u8) = in[k..][0..lanes].*;
                 const p: @Vector(lanes, u8) = prior[k..][0..lanes].*;
                 cur[k..][0..lanes].* = i +% p;
             }
             for (cur[k..], in[k..], prior[k..]) |*c, i, p| c.* = i +% p;
         },
-        .avg => {
-            var a: Pixel = @as(Pixel, in[0..bpp].*) +% (@as(Pixel, prior[0..bpp].*) >> @splat(1));
-            cur[0..bpp].* = a;
-            var k: usize = bpp;
-            while (k < nk) : (k += bpp) {
-                const b: Pixel = prior[k..][0..bpp].*;
-                // `(a + b) >> 1` without leaving 8 bits.
-                const average = (a & b) +% ((a ^ b) >> @splat(1));
-                a = @as(Pixel, in[k..][0..bpp].*) +% average;
-                cur[k..][0..bpp].* = a;
+        inline .sub, .avg, .avg_first => |f| predictPixels(bpp, f, cur, prior, in),
+        .paeth => paethPixels(bpp, cur, prior, in),
+    }
+}
+
+/// The filters that predict each pixel from the one on its left (`a`) and
+/// the one above (`b`), a pixel at a time, the pixel on the left kept in a
+/// register. The first pixel has `a` zero, which gives the original's
+/// first-pixel forms.
+fn predictPixels(
+    comptime bpp: usize,
+    comptime filter: Filter,
+    cur: []u8,
+    prior: []const u8,
+    in: []const u8,
+) void {
+    // A pixel of 3 or 6 bytes is worked on in 4 or 8 lanes.
+    const lanes = comptime std.math.ceilPowerOfTwoAssert(usize, bpp);
+    const Pixel = @Vector(lanes, u8);
+    const reads_prior = filter == .avg;
+    const nk = cur.len;
+    var a: Pixel = @splat(0);
+    var k: usize = 0;
+    // Whole lanes while they stay in the row; the lanes past `bpp` hold
+    // the next pixel's bytes, which the next store overwrites.
+    while (nk - k >= lanes) : (k += bpp) {
+        const b: Pixel = if (reads_prior) prior[k..][0..lanes].* else undefined;
+        a = predict(filter, lanes, in[k..][0..lanes].*, a, b);
+        cur[k..][0..lanes].* = a;
+    }
+    // The last pixel, when its lanes would pass the row's end.
+    while (k < nk) : (k += bpp) {
+        var x: [lanes]u8 = @splat(0);
+        var b: [lanes]u8 = @splat(0);
+        x[0..bpp].* = in[k..][0..bpp].*;
+        if (reads_prior) b[0..bpp].* = prior[k..][0..bpp].*;
+        a = predict(filter, lanes, x, a, b);
+        cur[k..][0..bpp].* = @as([lanes]u8, a)[0..bpp].*;
+    }
+}
+
+/// The filtered bytes `x` plus the filter's prediction from `a` and `b`.
+inline fn predict(
+    comptime filter: Filter,
+    comptime lanes: usize,
+    x: @Vector(lanes, u8),
+    a: @Vector(lanes, u8),
+    b: @Vector(lanes, u8),
+) @Vector(lanes, u8) {
+    const one: @Vector(lanes, u8) = @splat(1);
+    return x +% switch (filter) {
+        .sub => a,
+        // `(a + b) >> 1` without leaving 8 bits.
+        .avg => (a & b) +% ((a ^ b) >> one),
+        .avg_first => a >> one,
+        else => comptime unreachable,
+    };
+}
+
+/// The Paeth filter as `predictPixels` works, with `c` the pixel above the
+/// one on the left, in 16-bit lanes, so the chain from one pixel to the next
+/// never widens or narrows.
+fn paethPixels(comptime bpp: usize, cur: []u8, prior: []const u8, in: []const u8) void {
+    if (bpp == 3) {
+        // A byte at a time, three chains side by side: faster here than one
+        // chain of 4-lane pixels.
+        var a: [bpp]@Vector(1, i16) = @splat(@splat(0));
+        var c: [bpp]@Vector(1, i16) = @splat(@splat(0));
+        var k: usize = 0;
+        while (k < cur.len) : (k += bpp) {
+            inline for (0..bpp) |l| {
+                const b: @Vector(1, i16) = @splat(prior[k + l]);
+                const x: @Vector(1, i16) = @splat(in[k + l]);
+                a[l] = (x + paeth(1, a[l], b, c[l])) & @as(@Vector(1, i16), @splat(0xff));
+                cur[k + l] = @intCast(a[l][0]);
+                c[l] = b;
             }
-        },
-        .paeth => {
-            var a: Pixel = @as(Pixel, in[0..bpp].*) +% @as(Pixel, prior[0..bpp].*);
-            cur[0..bpp].* = a;
-            var k: usize = bpp;
-            while (k < nk) : (k += bpp) {
-                const b: Pixel = prior[k..][0..bpp].*;
-                const c: Pixel = prior[k - bpp ..][0..bpp].*;
-                a = @as(Pixel, in[k..][0..bpp].*) +% paeth(bpp, a, b, c);
-                cur[k..][0..bpp].* = a;
-            }
-        },
-        .avg_first => {
-            var a: Pixel = in[0..bpp].*;
-            cur[0..bpp].* = a;
-            var k: usize = bpp;
-            while (k < nk) : (k += bpp) {
-                a = @as(Pixel, in[k..][0..bpp].*) +% (a >> @splat(1));
-                cur[k..][0..bpp].* = a;
-            }
-        },
+        }
+        return;
+    }
+    const lanes = comptime std.math.ceilPowerOfTwoAssert(usize, bpp);
+    const Pixel = @Vector(lanes, u8);
+    const Wide = @Vector(lanes, i16);
+    const nk = cur.len;
+    var a: Wide = @splat(0);
+    var c: Wide = @splat(0);
+    var k: usize = 0;
+    while (nk - k >= lanes) : (k += bpp) {
+        const b: Wide = @as(Pixel, prior[k..][0..lanes].*);
+        const x: Wide = @as(Pixel, in[k..][0..lanes].*);
+        a = (x + paeth(lanes, a, b, c)) & @as(Wide, @splat(0xff));
+        cur[k..][0..lanes].* = @as(Pixel, @intCast(a));
+        c = b;
+    }
+    while (k < nk) : (k += bpp) {
+        var x: [lanes]u8 = @splat(0);
+        var b: [lanes]u8 = @splat(0);
+        x[0..bpp].* = in[k..][0..bpp].*;
+        b[0..bpp].* = prior[k..][0..bpp].*;
+        const b16: Wide = @as(Pixel, b);
+        a = (@as(Wide, @as(Pixel, x)) + paeth(lanes, a, b16, c)) & @as(Wide, @splat(0xff));
+        cur[k..][0..bpp].* = @as([lanes]u8, @as(Pixel, @intCast(a)))[0..bpp].*;
+        c = b16;
     }
 }
 
 /// `stbi__paeth` on each lane: the Paeth predictor in the original's
 /// branch-free form, which equals the PNG specification's.
-fn paeth(comptime n: usize, a: @Vector(n, u8), b: @Vector(n, u8), c: @Vector(n, u8)) @Vector(n, u8) {
-    const Wide = @Vector(n, i16);
-    const a16: Wide = a;
-    const b16: Wide = b;
-    const c16: Wide = c;
-    const thresh = c16 * @as(Wide, @splat(3)) - (a16 + b16);
+fn paeth(
+    comptime n: usize,
+    a: @Vector(n, i16),
+    b: @Vector(n, i16),
+    c: @Vector(n, i16),
+) @Vector(n, i16) {
+    // `3c - b` first: it does not wait for `a`, the pixel just decoded.
+    const thresh = (c * @as(@Vector(n, i16), @splat(3)) - b) - a;
     const lo = @min(a, b);
     const hi = @max(a, b);
-    const t0 = @select(u8, @as(Wide, hi) <= thresh, lo, c);
-    return @select(u8, thresh <= @as(Wide, lo), hi, t0);
+    const t0 = @select(i16, hi <= thresh, lo, c);
+    return @select(i16, thresh <= lo, hi, t0);
 }
 
 /// Unpacks samples of `depth` bits, high bits first, one per byte of
