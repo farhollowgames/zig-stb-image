@@ -532,7 +532,13 @@ fn psdFile(photo: Photo, rle: bool) ![]u8 {
     try w.writeInt(u16, 3, .big);
     for (0..3) |_| try w.writeInt(u32, 0, .big);
     try w.writeInt(u16, @intFromBool(rle), .big);
+    // Photoshop stores colour with alpha blended over white, which the
+    // original takes out again; colour below that matte is not valid.
     const rgba = try withComponents(photo, 4);
+    for (0..rgba.len / 4) |i| {
+        const a: u32 = rgba[i * 4 + 3];
+        for (rgba[i * 4 ..][0..3]) |*c| c.* = @intCast((@as(u32, c.*) * a + 255 * (255 - a)) / 255);
+    }
     const width: usize = photo.width;
     const plane_row = try gpa.alloc(u8, width);
     if (!rle) {

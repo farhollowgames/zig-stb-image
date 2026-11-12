@@ -1,5 +1,40 @@
 # Status
 
+## Report at the end of step 4 (11 November 2026)
+
+- **Done:** every format, function and switch of stb_image 2.30 is ported
+  to Zig 0.17 and compared with the original, on `main`. 162 tests pass in
+  ReleaseSafe (159 against both builds of the original, SSE2 and scalar);
+  the JPEG tests also pass with `-Djpeg-idct=sse2`. About 27,500 seeded fuzz
+  cases; every corpus file through every load and query path.
+- **Benchmark** (port time / original time, 960 x 720 photo, busy machine;
+  `doc/BENCHMARKS.md`): PNG 1.00 to 1.20 (palette slowest); JPEG 1.37 to
+  1.52 against SSE2, 2.78 to RGBA, 0.91 to 1.01 against the scalar build;
+  BMP 1.95 to 2.06; PSD 1.44 to 1.52; TGA 0.94 to 1.03; HDR 0.89 to 0.99;
+  PNM 0.99 to 1.00; GIF 0.75 to 0.83; zlib 1.09.
+- **Awaiting the author's approval** ("Left out" below has each):
+  - build switches with no option: failure strings, stdio, linear, zlib,
+    SIMD (with `-Djpeg-idct` for the one place SIMD and scalar differ),
+    thread locals, Windows UTF-8, static/STBIDEF;
+  - refusals where the original is unsafe: zlib initial size 0 (loops for
+    ever); PNG palette index past every PLTE; BMP palette index past the
+    palette (this refuses real OS/2 BMPs, `Core_1/4/8_Bit.bmp`,
+    `pal8os2sp.bmp`, because the original reads 4 entries too few); BMP
+    height -2^31; TGA raw cut short; PSD colour below the white matte; JPEG
+    blocks no scan wrote; JPEG scalar IDCT `int` overflow; GIF disposal 3
+    once two frames are out; GIF zero-area animation; flipped GIF animation
+    of 1 to 3 components; GIF rows past `int`; HDR flat pixels cut short;
+    PIC scanline failure converted from NULL.
+  - choices: the PNG and BMP palette cases could read unset entries as
+    zero instead of refusing; `-Djpeg-idct` defaults to scalar, where
+    upstream's x86-64 default is SSE2.
+- **Open:** the sanitizer run, now one process per call (an overrun of the
+  original corrupted the heap and ended the earlier run in the GIF tests),
+  takes longer than the 50-minute build limit and has not finished. The
+  partial run flagged GIF animations, PIC loads and two damaged PNGs; they
+  are not yet matched against the refusals the tests expect.
+- **Next:** steps 5 to 7 (see "Work in progress").
+
 Every public function, build option and format of stb_image 2.30 (stb
 commit `a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d`, `reference/stb_image.h`,
 `STBI_VERSION 1`), and its state:
@@ -14,30 +49,48 @@ commit `a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d`, `reference/stb_image.h`,
 
 ## Work in progress
 
-The port is being written. This section says where it stands, for whoever
-picks it up; the git log has the detail.
+Where the port stands, for whoever picks it up; the git log has the detail.
+Steps 1 to 4 of the port methodology are done on `main`; steps 5 to 7 (the
+performance pass, the skeptic's review, the fixes) are not started.
 
-- **Done:** the repository, the pinned original in `reference/`, the test
-  images as lazy dependencies, the shared code (`src/common.zig`: the byte
-  source, size checks, component conversion; `src/postprocess.zig`;
-  `src/settings.zig`; `src/errors.zig`), the public API in
-  `src/stb_image.zig`, and the oracle (`test/shim/oracle.c`,
-  `test/oracle.zig`, `test/fuzz.zig`, `test/corpus.zig`).
-- **Placeholders:** every format file in `src/` but `src/png.zig` (detects
-  nothing) and `src/pow.zig` (std's `pow`, not the C library's).
-- **zlib and PNG:** ported and oracle-tested on `port/png`.
-- **Next:** the decoders, each with its oracle tests:
-  zlib and PNG; JPEG; the other seven formats and `pow`. Then the
-  benchmark, the docs, and steps 5 to 7 of the methodology.
+- **Done:** every format, function and switch of the tables below is ported
+  and compared with the original (162 tests, all passing in ReleaseSafe;
+  the JPEG tests also with `-Djpeg-idct=sse2`). `zig build bench` times
+  each format against the original. `doc/parity.md` lists every input the
+  port refuses where the original is unsafe; `doc/TESTING.md` and
+  `doc/BENCHMARKS.md` describe the tests and the benchmark.
+- **Awaiting the author:** the items marked "awaiting the author's approval"
+  below: the build switches left out, and each refusal of an input the
+  original is unsafe on.
+- **Left to do:**
+  1. Step 5, the performance pass, by an agent that did not write the port,
+     on branch `review/perf-and-skeptic`. Zig 0.17 never vectorizes loops,
+     so the original's SSE2 paths (JPEG IDCT, YCbCr conversion, 2x2
+     upsampling) and the loops clang vectorizes at -O3 (PNG unfiltering,
+     component conversion, PNG palette expansion) need explicit `@Vector`
+     code to keep up. Each change is kept only if the tests pass and the
+     benchmark gains.
+  2. Step 6, a skeptic agent that did not write the port, on the same
+     branch: untested features, weak comparisons, narrow fuzzing, a
+     benchmark that favours the port, undefined behaviour, overflow and
+     stale references.
+  3. Step 7, each confirmed finding fixed with a test that failed first;
+     then the tests, `zig build sanitize` and the benchmark again, and the
+     README's numbers updated.
 - **Builds:** one at a time, under the memory cap, as
   `timeout 3000 systemd-run --user --scope -q -p MemoryMax=6G zig build <step> -j3`.
+  The full test run peaks near 6 GB and takes about 6 minutes.
+- **Resume the sanitizer run:** run it per test file
+  (`zig build sanitize -Dtest-filter=<file prefix>`) so each stays under
+  the 50-minute limit, or fork only for the calls the tests expect to be
+  unsafe; then check every flagged call against `doc/parity.md`.
 - **Sanitizer run:** `zig build sanitize` runs every test's calls to the
-  original through a build of it with AddressSanitizer and
-  UndefinedBehaviorSanitizer (system clang) and lists the flagged calls in
-  `zig-out/sanitize/report.txt`.
-- **Branches:** the decoders are written on `port/png`, `port/jpeg`,
-  `port/bmp-tga-psd-pnm` and `port/gif-hdr-pic` (worktrees under
-  `~/Projects/zig-stb-image.wt/`), merged into `main` when their tests pass.
+  original, each in a process of its own, through a build of it with
+  AddressSanitizer and UndefinedBehaviorSanitizer (system clang), and lists
+  the flagged calls in `zig-out/sanitize/report.txt`.
+- **Branches:** the decoders were written on `port/png`, `port/jpeg`,
+  `port/bmp-tga-psd-pnm` and `port/gif-hdr-pic` (local only, worktrees under
+  `~/Projects/zig-stb-image.wt/`), all merged into `main`.
 
 ## Formats
 
@@ -64,22 +117,22 @@ picks it up; the git log has the detail.
 
 | upstream | zig-stb-image | tests | state |
 | --- | --- | --- | --- |
-| `stbi_load_from_memory`, `stbi_load_16_from_memory`, `stbi_loadf_from_memory` | `loadFromMemory(u8 / u16 / f32, …)` | every corpus file and fuzz case | ported |
-| `stbi_load_from_callbacks`, `stbi_load_16_from_callbacks`, `stbi_loadf_from_callbacks`, `stbi_io_callbacks` | `loadFromReader` on a `*std.Io.Reader` | corpus files; fuzz cases | ported |
-| `stbi_load_from_file`, `stbi_load_from_file_16`, `stbi_loadf_from_file` | `loadFromFile` on a `*std.Io.File.Reader`, leaving it where the original leaves the `FILE` | corpus files; fuzz cases | ported |
+| `stbi_load_from_memory`, `stbi_load_16_from_memory`, `stbi_loadf_from_memory` | `loadFromMemory(u8 / u16 / f32, …)` | every corpus file and fuzz case | oracle-tested |
+| `stbi_load_from_callbacks`, `stbi_load_16_from_callbacks`, `stbi_loadf_from_callbacks`, `stbi_io_callbacks` | `loadFromReader` on a `*std.Io.Reader` | corpus files; fuzz cases | oracle-tested |
+| `stbi_load_from_file`, `stbi_load_from_file_16`, `stbi_loadf_from_file` | `loadFromFile` on a `*std.Io.File.Reader`, leaving it where the original leaves the `FILE` | corpus files; fuzz cases | oracle-tested |
 | `stbi_load`, `stbi_load_16`, `stbi_loadf` | `loadFromPath` | | ported |
 | `stbi_load_gif_from_memory` | `loadGifFromMemory` | `test/gif_test.zig` | oracle-tested |
-| `stbi_info_from_memory`, `stbi_info_from_callbacks`, `stbi_info_from_file`, `stbi_info` | `infoFromMemory`, `infoFromReader`, `infoFromFile`, `infoFromPath` | corpus files; fuzz cases | ported |
-| `stbi_is_16_bit_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_16_bit` | `is16BitFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | ported |
-| `stbi_is_hdr_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_hdr` | `isHdrFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | ported |
-| `desired_channels`, `*channels_in_file` | `Options.components`, `Image.channels` and `Image.channels_in_file` | every load compares all five | ported |
+| `stbi_info_from_memory`, `stbi_info_from_callbacks`, `stbi_info_from_file`, `stbi_info` | `infoFromMemory`, `infoFromReader`, `infoFromFile`, `infoFromPath` | corpus files; fuzz cases | oracle-tested |
+| `stbi_is_16_bit_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_16_bit` | `is16BitFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | oracle-tested |
+| `stbi_is_hdr_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_hdr` | `isHdrFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | oracle-tested |
+| `desired_channels`, `*channels_in_file` | `Options.components`, `Image.channels` and `Image.channels_in_file` | every load compares all five | oracle-tested |
 | `stbi_set_flip_vertically_on_load`, `…_thread` | `Options.flip_vertically`; `settings.setFlipVerticallyOnLoad`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
 | `stbi_set_unpremultiply_on_load`, `…_thread` | `Options.unpremultiply`; `settings.setUnpremultiplyOnLoad`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
 | `stbi_convert_iphone_png_to_rgb`, `…_thread` | `Options.convert_iphone_png`; `settings.convertIphonePngToRgb`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
-| `stbi_hdr_to_ldr_gamma`, `stbi_hdr_to_ldr_scale` | `Options.hdr_to_ldr_gamma`, `…_scale`; `settings.setHdrToLdrGamma`, `…Scale` | | ported |
-| `stbi_ldr_to_hdr_gamma`, `stbi_ldr_to_hdr_scale` | `Options.ldr_to_hdr_gamma`, `…_scale`; `settings.setLdrToHdrGamma`, `…Scale` | | ported |
-| `stbi_failure_reason` | the returned `Error`; `failureReason(err)` | every failing load compares it | ported |
-| `stbi_image_free` | `Image.deinit`, `Animation.deinit` | every test runs on `std.testing.allocator` | ported |
+| `stbi_hdr_to_ldr_gamma`, `stbi_hdr_to_ldr_scale` | `Options.hdr_to_ldr_gamma`, `…_scale`; `settings.setHdrToLdrGamma`, `…Scale` | fuzz cases at random gammas and scales; "hdr: …" gamma and scale tests | oracle-tested |
+| `stbi_ldr_to_hdr_gamma`, `stbi_ldr_to_hdr_scale` | `Options.ldr_to_hdr_gamma`, `…_scale`; `settings.setLdrToHdrGamma`, `…Scale` | as above | oracle-tested |
+| `stbi_failure_reason` | the returned `Error`; `failureReason(err)` | every failing load compares it | oracle-tested |
+| `stbi_image_free` | `Image.deinit`, `Animation.deinit` | every test runs on `std.testing.allocator` | oracle-tested |
 | `stbi_zlib_decode_malloc_guesssize`, `…_malloc`, `…_malloc_guesssize_headerflag`, `…_buffer`, `…_noheader_malloc`, `…_noheader_buffer` | `zlib.decodeAlloc` (`initial_size`, `parse_header`), `zlib.decodeBuffer` (`parse_header`) | "zlib: every block type and block size … through all six functions" and the other zlib tests | oracle-tested |
 
 ## Build options
@@ -104,6 +157,25 @@ picks it up; the git log has the detail.
 
 Where the port departs from the original. `doc/parity.md` has the detail and
 the tests of each case where the original is unsafe or never returns.
+
+### Build switches
+
+- `STBI_NO_FAILURE_STRINGS`, `STBI_NO_STDIO`, `STBI_NO_LINEAR`,
+  `STBI_SUPPORT_ZLIB` and `STBI_NO_ZLIB`: no option. Zig compiles only the
+  functions a program calls, so the failure strings, the file functions,
+  the float conversions and `zlib` cost nothing when unused.
+- `STBI_NO_SIMD`, `STBI_SSE2`, `STBI_NEON`: no option. The original's SSE2
+  and scalar paths give the same pixels on every valid file, and the tests
+  compare the port with both. They differ on JPEG coefficients past 16
+  bits; `-Djpeg-idct=scalar|sse2` picks which the port follows (scalar by
+  default; upstream builds SSE2 by default on x86-64). The NEON build is
+  not followed.
+- `STBI_NO_THREAD_LOCALS`: no option; Zig has `threadlocal` on every target
+  the port builds for.
+- `STBI_WINDOWS_UTF8` and `stbi_convert_wchar_to_utf8`: left out; Zig paths
+  are UTF-8 on Windows already.
+- `STB_IMAGE_STATIC`, `STBIDEF`, `STB_IMAGE_IMPLEMENTATION`: left out; they
+  are C linkage only.
 
 ### zlib and PNG
 
