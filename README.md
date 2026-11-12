@@ -24,11 +24,14 @@ verified. See [the tests](doc/TESTING.md) and [parity with the original](doc/par
   or every frame with its delay), HDR (Radiance RGBE), PIC (Softimage) and
   binary PNM.
 - Loads from memory, from a `std.Io.Reader`, from a file or a path; the
-  info, 16-bit and HDR queries; any requested component count; vertical
-  flip, HDR and LDR gamma and scale, iPhone unpremultiply and BGR
-  conversion, as global and thread-local settings or per call.
+  info, 16-bit and HDR queries; any requested component count.
+- Vertical flip, iPhone unpremultiply and BGR conversion as global and
+  thread-local settings, HDR and LDR gamma and scale as global settings, and
+  all of them per call.
 - `stbi.zlib`: the original's zlib inflate.
-- Caller-set dimension and memory limits, defaulting to the original's.
+- Caller-set limits on image dimensions and image buffer sizes, defaulting
+  to the original's. They do not bound all memory (a PNG's compressed data
+  inflates as far as it goes, as in the original); an allocator can.
 - Every function that allocates takes a `std.mem.Allocator`.
 
 ## Install
@@ -78,16 +81,19 @@ The reasons are in [`doc/parity.md`](doc/parity.md).
 - `Options` per call for every setting, beside the global and thread-local
   ones.
 - `Limits` per call, in place of the `STBI_MAX_DIMENSIONS` compile switch.
-- `-Djpeg-idct=scalar|sse2` picks which of the original's builds the JPEG
-  decoder follows on damaged coefficients, where the two differ.
+- `-Djpeg-idct=sse2|scalar` picks which of the original's builds the JPEG
+  decoder follows on damaged coefficients, where the two differ: `sse2` on
+  x86-64, as the original builds there, and `scalar` elsewhere.
 
 *Changes to expect*:
 
 - Failures are a Zig error set; `failureReason` and `failureMessage` give
   the original's two strings.
 - Where the original reads or writes out of bounds, reads memory it never
-  wrote or is undefined, the port returns an error. Some real files are
-  refused this way, such as OS/2 BMPs that use their last palette entries.
+  wrote or is undefined, the port returns an error.
+- BMP palette entries the original never reads, which it takes from
+  uninitialized memory, read as black, so OS/2 BMPs whose palette the
+  original reads short load.
 - The component count is an enum, so the original's "bad req_comp" cannot
   happen.
 - The reader functions take a `std.Io.Reader` in place of
@@ -102,29 +108,37 @@ The parts of the original that are left out, each with its reason, are listed in
 
 ## Testing and benchmarks
 
-`zig build test` runs 162 tests. 159 run the original beside the port on the
-same inputs and compare their results: success, size, channels, every output
-byte (floats by their bits), the failure reason in both forms, and where a
-file is left. The inputs are the test images of other decoders (PngSuite,
-bmpsuite, jpeg-decoder, image-rs, psd-tools, libjpeg-turbo), hand-made edge
-cases and about 27,500 seeded fuzz cases. `zig build sanitize` runs every
-test input through the original under AddressSanitizer and
-UndefinedBehaviorSanitizer, to find the inputs the original is unsafe on.
+`zig build test` runs 182 tests. 171 run the original beside the port on
+the same inputs and compare their results: success, size, channels, every
+output byte (floats by their bits), the failure reason in both forms, and
+where a file is left. The inputs are the test images of other decoders
+(PngSuite, bmpsuite, jpeg-decoder, image-rs, psd-tools, libjpeg-turbo),
+hand-made edge cases and about 27,500 seeded fuzz cases, loaded from
+memory, readers, files and paths. They pass in ReleaseSafe and ReleaseFast.
+`zig build sanitize` runs every test input through the original under
+AddressSanitizer and UndefinedBehaviorSanitizer: of 419,867 calls it
+flagged 3,119. The port refuses each of those inputs except 85, which
+[`doc/parity.md`](doc/parity.md) explains: an empty PNG IDAT chunk, where
+the original passes a null pointer to `memcpy` for 0 bytes, and overflows
+in the scalar JPEG IDCT, whose build the port follows only with
+`-Djpeg-idct=scalar` (and then refuses them).
 
-Port time against original time, for a 960 x 720 photograph:
+Port time against original time, for a 960 x 720 photograph loaded from
+memory:
 
 | feature | port vs original |
 | --- | ---: |
-| PNG, 8-bit RGB | 10% slower |
-| JPEG 4:2:0 | 52% slower (1% slower than the original without SIMD) |
-| BMP, 24-bit | 95% slower |
-| GIF, first frame | 25% faster |
-| zlib inflate | 9% slower |
+| PNG, 8-bit RGB | 22% faster |
+| JPEG 4:2:0 | 48% faster |
+| JPEG progressive | 3% faster |
+| BMP, 24-bit | about 25 times faster |
+| zlib inflate | 18% faster |
 
-AMD Ryzen 9 9950X3D, one thread, Linux 7.3.3, Zig 0.17.0 ReleaseFast
-against clang 22.1.8 `-O3` with the original's SSE2 paths, at commit
-`8e1f84e`, on a busy machine (load average about 15 on 32 hardware
-threads). The port has no SIMD code yet; a performance pass is next.
+No row of the full table is slower than the original; the closest are
+progressive JPEG and PNM (1% faster). AMD Ryzen 9 9950X3D, one thread,
+Linux 7.3.3, Zig 0.17.0 ReleaseFast against clang 22.1.8 `-O3` with the
+original's SSE2 paths, at commit `ac97ea4`, best of three runs on a busy
+machine (load average 6 to 20 on 32 hardware threads).
 
 - [`doc/TESTING.md`](doc/TESTING.md): how the tests compare the port with
   the original, and what this repository's tests cover.

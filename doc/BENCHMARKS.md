@@ -39,10 +39,10 @@ constant.
 
 ## Machine and flags
 
-Measured on 11 November 2026, at commit `8e1f84e` plus the PSD input
-fix of the next commit, on an AMD Ryzen 9 9950X3D (16 cores, 32 threads)
-under Linux 7.3.3 (CachyOS). Other builds were running: the one-minute load
-average was about 15 during the run. Thread CPU time leaves out time spent
+Measured on 12 November 2026, at commit `ac97ea4`, with `--rounds 3`, on
+an AMD Ryzen 9 9950X3D (16 cores, 32 threads) under Linux 7.3.3 (CachyOS).
+Other builds were running: the one-minute load average was between 6 and
+20 during the run. Thread CPU time leaves out time spent
 waiting, but other threads on the same core still slow a sample; the
 ranges show how much.
 
@@ -64,45 +64,55 @@ median time over the original's, so below 1 is faster.
 
 | feature | port | range | original | range | time, port / original | original, no SIMD | time, port / no SIMD |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| png rgb | 72.8 | 7.3% | 80.0 | 8.2% | 1.10 | | |
-| png rgba | 64.9 | 8.9% | 66.6 | 7.6% | 1.03 | | |
-| png grey | 158.4 | 3.6% | 165.1 | 2.3% | 1.04 | | |
-| png rgb 16-bit | 41.1 | 6.8% | 46.5 | 3.6% | 1.13 | | |
-| png rgb adam7 | 70.4 | 7.0% | 75.7 | 9.3% | 1.08 | | |
-| png palette | 253.1 | 5.3% | 302.9 | 1.8% | 1.20 | | |
-| png rgb to rgba | 76.2 | 5.3% | 82.8 | 5.5% | 1.09 | | |
-| png rgb to float | 30.6 | 2.4% | 30.6 | 3.3% | 1.00 | | |
-| jpeg 4:4:4 | 124.6 | 3.1% | 189.1 | 3.0% | 1.52 | 113.5 | 0.91 |
-| jpeg 4:2:0 | 189.6 | 1.9% | 288.5 | 2.1% | 1.52 | 191.1 | 1.01 |
-| jpeg 4:2:0 to rgba | 186.3 | 2.4% | 517.8 | 2.5% | 2.78 | 188.3 | 1.01 |
-| jpeg grey | 198.0 | 1.5% | 298.3 | 0.9% | 1.51 | 195.4 | 0.99 |
-| jpeg progressive | 73.9 | 6.2% | 100.9 | 2.5% | 1.37 | 71.2 | 0.96 |
-| jpeg ycck | 63.7 | 3.0% | 94.2 | 3.5% | 1.48 | 61.8 | 0.97 |
-| bmp 24-bit | 510.5 | 1.2% | 994.6 | 12.7% | 1.95 | | |
-| bmp 32-bit | 397.5 | 7.7% | 818.2 | 4.7% | 2.06 | | |
-| tga raw | 4062.1 | 4.7% | 4189.3 | 3.5% | 1.03 | | |
-| tga rle | 317.0 | 3.7% | 296.8 | 8.4% | 0.94 | | |
-| psd raw | 260.0 | 8.0% | 374.1 | 4.8% | 1.44 | | |
-| psd rle | 249.3 | 6.7% | 379.1 | 5.8% | 1.52 | | |
-| hdr float | 193.4 | 5.4% | 171.7 | 6.5% | 0.89 | | |
-| hdr to 8-bit | 39.4 | 4.5% | 39.2 | 6.1% | 0.99 | | |
-| pnm 8-bit | 22517.9 | 7.7% | 22367.9 | 12.5% | 0.99 | | |
-| pnm 16-bit | 11174.3 | 26.6% | 11157.3 | 11.7% | 1.00 | | |
-| gif first frame | 390.5 | 19.5% | 294.1 | 25.7% | 0.75 | | |
-| gif every frame | 432.7 | 40.6% | 360.7 | 17.3% | 0.83 | | |
-| zlib inflate | 264.8 | 9.5% | 288.2 | 6.1% | 1.09 | | |
+| png rgb | 115.0 | 0.4% | 89.6 | 0.2% | 0.78 | | |
+| png rgba | 99.9 | 0.6% | 80.0 | 2.9% | 0.80 | | |
+| png grey | 261.7 | 0.5% | 184.5 | 0.4% | 0.71 | | |
+| png rgb 16-bit | 64.7 | 2.8% | 54.6 | 1.0% | 0.84 | | |
+| png rgb adam7 | 104.7 | 0.2% | 83.6 | 1.5% | 0.80 | | |
+| png palette | 533.4 | 0.4% | 329.3 | 0.6% | 0.62 | | |
+| png rgb to rgba | 109.7 | 0.5% | 89.5 | 1.2% | 0.82 | | |
+| png rgb to float | 36.9 | 0.1% | 33.5 | 0.2% | 0.91 | | |
+| jpeg 4:4:4 | 299.7 | 0.6% | 208.8 | 0.4% | 0.70 | 125.2 | 0.42 |
+| jpeg 4:2:0 | 598.4 | 0.4% | 310.4 | 0.3% | 0.52 | 206.7 | 0.35 |
+| jpeg 4:2:0 to rgba | 586.3 | 0.3% | 563.6 | 0.6% | 0.96 | 206.7 | 0.35 |
+| jpeg grey | 621.0 | 0.5% | 321.1 | 0.4% | 0.52 | 210.9 | 0.34 |
+| jpeg progressive | 114.1 | 1.7% | 110.3 | 1.1% | 0.97 | 76.0 | 0.67 |
+| jpeg ycck | 137.2 | 1.4% | 101.0 | 1.7% | 0.74 | 66.6 | 0.49 |
+| bmp 24-bit | 23205.9 | 2.8% | 1008.8 | 9.1% | 0.04 | | |
+| bmp 32-bit | 18590.6 | 2.4% | 856.8 | 4.1% | 0.05 | | |
+| bmp 24-bit to rgba | 7107.1 | 0.2% | 922.2 | 3.1% | 0.13 | | |
+| tga raw | 15792.3 | 0.7% | 4489.9 | 0.6% | 0.28 | | |
+| tga rle | 400.1 | 4.6% | 301.8 | 7.4% | 0.75 | | |
+| tga raw to rgba | 5746.3 | 0.3% | 3598.8 | 0.3% | 0.63 | | |
+| tga raw to grey | 6961.2 | 2.3% | 3616.1 | 0.7% | 0.52 | | |
+| psd raw | 611.6 | 1.0% | 391.8 | 3.0% | 0.64 | | |
+| psd rle | 454.0 | 0.5% | 396.3 | 17.2% | 0.87 | | |
+| psd raw to rgb | 593.8 | 0.7% | 387.0 | 2.2% | 0.65 | | |
+| hdr float | 226.2 | 7.8% | 178.5 | 6.5% | 0.79 | | |
+| hdr to 8-bit | 43.1 | 1.0% | 41.2 | 1.1% | 0.95 | | |
+| pnm 8-bit | 23728.8 | 1.5% | 23575.6 | 2.0% | 0.99 | | |
+| pnm 16-bit | 13259.5 | 5.6% | 13181.7 | 4.6% | 0.99 | | |
+| gif first frame | 416.0 | 4.6% | 331.9 | 13.1% | 0.80 | | |
+| gif every frame | 510.2 | 15.0% | 399.8 | 11.0% | 0.78 | | |
+| zlib inflate | 370.7 | 2.9% | 304.0 | 3.1% | 0.82 | | |
+| png rgb via reader | 110.5 | 3.0% | 85.7 | 3.6% | 0.78 | | |
+| png rgb via file | 112.3 | 0.7% | 87.7 | 0.2% | 0.78 | | |
+| jpeg 4:2:0 via reader | 581.7 | 4.4% | 307.6 | 5.6% | 0.53 | | |
+| jpeg 4:2:0 via file | 582.2 | 0.4% | 308.2 | 0.2% | 0.53 | | |
+| bmp 24-bit via reader | 4869.9 | 0.3% | 762.3 | 0.6% | 0.16 | | |
+| bmp 24-bit via file | 2668.0 | 2.8% | 688.5 | 1.0% | 0.26 | | |
+| psd raw via reader | 438.2 | 0.7% | 370.8 | 2.5% | 0.85 | | |
+| psd raw via file | 395.6 | 0.5% | 350.3 | 2.1% | 0.89 | | |
+| psd rle via reader | 394.6 | 0.4% | 338.4 | 4.2% | 0.86 | | |
+| psd rle via file | 367.0 | 0.9% | 309.9 | 2.0% | 0.84 | | |
 
 ## Known biases and slower rows
 
-- **JPEG.** The table above predates the port's vector code. The port
-  now computes the IDCT, the YCbCr conversion (to three and four channels,
-  and YCCK) and the 2x2 upsampling on `@Vector` lanes, and builds the SSE2
-  IDCT by default on x86-64. A full run, best of 3, on 12 November 2026
-  gave on the JPEG rows, time port / original SSE2: 4:4:4 0.70, 4:2:0
-  0.52, 4:2:0 to rgba 0.96, grey 0.52, progressive 0.92, ycck 0.73
-  (against the original without SIMD 0.33 to 0.66). Much of the lead on RGB output is the original's scalar conversion
-  to three channels, which its SSE2 code leaves out; to RGBA, which the
-  SSE2 code converts, the two are close.
+- **JPEG.** Much of the port's lead on RGB output is the original's
+  scalar conversion to three channels, which its SSE2 code leaves out; to
+  RGBA, which the SSE2 code converts, the two are close (0.96).
+  Progressive JPEG (0.97) is the closest row: its decoding is the port's
+  scalar Huffman code against the original's.
 - **Memory, reader and file loads.** The rows above, and every row whose
   name does not say otherwise, load from memory. The rows named "via
   reader" load through a `std.Io.Reader` over the bytes, against the
@@ -112,10 +122,7 @@ median time over the original's, so below 1 is faster.
   decode, a few microseconds). Both sides then read through a 128-byte
   buffer, so the port's fast paths that take a whole row from memory do
   not apply; it copies rows and planes from that buffer in pieces, as
-  the original reads them byte by byte. A run on 12 November 2026, best of
-  3, gave, time port / original SSE2: png rgb 0.82 via reader, 0.83 via
-  file; jpeg 4:2:0 0.53 and 0.53; bmp 24-bit 0.15 and 0.25; psd raw 0.85
-  and 0.89; psd rle 0.83 and 0.84.
+  the original reads them byte by byte.
 - **Allocation.** The port's zlib output is shrunk to its length at the
   end (`realloc`), and PNG reads IDAT data in 1 MiB pieces; the original
   does neither.

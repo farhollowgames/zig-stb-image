@@ -1,5 +1,23 @@
 # Status
 
+## Report at the end of step 7 (12 November 2026)
+
+- Steps 5 to 7 are done on `review/perf-and-skeptic`. Every bench row is
+  faster than the original's SSE2 build (port time / original: PNG 0.62
+  to 0.91, JPEG 0.52 to 0.97, BMP 0.04 to 0.13, TGA 0.28 to 0.75, PSD 0.64
+  to 0.87, HDR 0.79 to 0.95, PNM 0.99, GIF 0.78 to 0.80, zlib 0.82; via
+  reader and file 0.16 to 0.89), with the same bytes.
+- 182 tests pass in ReleaseSafe and ReleaseFast. The skeptic's findings
+  are fixed with tests that failed first where there was a bug (the
+  `*Path` functions; a negative bit count in JPEG's Huffman decode; PIC
+  empty images the original returns safely).
+- The sanitizer pass checks every call the original is unsafe on against
+  the port: 3,034 of 3,119 refused, the other 85 the two harmless kinds in
+  `doc/parity.md`.
+- The author's decisions are applied (see "Work in progress"). The
+  step-4 report below is kept as it was written; its open points are
+  decided.
+
 ## Report at the end of step 4 (11 November 2026)
 
 - **Done:** every format, function and switch of stb_image 2.30 is ported
@@ -66,12 +84,14 @@ commit `a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d`, `reference/stb_image.h`,
 ## Work in progress
 
 Where the port stands, for whoever picks it up; the git log has the detail.
-Steps 1 to 4 of the port methodology are done on `main`; steps 5 to 7 (the
-performance pass, the skeptic's review, the fixes) are not started.
+Steps 1 to 4 of the port methodology are done on `main`, and steps 5 to 7
+(the performance pass, the skeptic's review, the fixes) on
+`review/perf-and-skeptic`, pushed. Step 8, the release, is the author's
+call: merge `review/perf-and-skeptic` into `main`, tag, publish.
 
 - **Done:** every format, function and switch of the tables below is ported
-  and compared with the original (162 tests, all passing in ReleaseSafe;
-  the JPEG tests also with `-Djpeg-idct=sse2`). `zig build bench` times
+  and compared with the original (182 tests, all passing in ReleaseSafe and
+  ReleaseFast; the JPEG tests also with `-Djpeg-idct=scalar`). `zig build bench` times
   each format against the original. `doc/parity.md` lists every input the
   port refuses where the original is unsafe; `doc/TESTING.md` and
   `doc/BENCHMARKS.md` describe the tests and the benchmark.
@@ -94,19 +114,21 @@ performance pass, the skeptic's review, the fixes) are not started.
   memory-only bench rows, and stale docs. No unsafe input was found in the
   fast paths (the whole suite also passes in ReleaseFast). Probes:
   `skeptic/probes`, `test/skeptic_probes.zig`.
-- **Step 7 is done** on `fix/skeptic` (worktree
-  `~/Projects/zig-stb-image.wt/fix`, with `review/perf-and-skeptic` merged
-  in; the subsection "Step 7: fixes" has each finding), not yet merged
-  back.
-- **Left to do:**
-  1. Merge `fix/skeptic` into `review/perf-and-skeptic`; rerun the
-     sanitizer pass, whose PIC counts change with the empty-image fix.
-  2. Merge `main` (where another agent fixes the READMEs) into this branch,
-     then update README.md: `-Djpeg-idct` defaults to `sse2` on x86-64, the
-     BMP palette change, the "Not included" link (`#left-out-approved`),
-     the headline percentages from a fresh full bench, and
-     `doc/BENCHMARKS.md`'s results table.
-  3. Run the full tests, the sanitizer and the bench once more; push.
+- **Step 7 is done** (`fix/skeptic`, merged; the subsection "Step 7:
+  fixes" has each finding). The sanitizer pass over every test file
+  (12 November 2026): 419,867 calls, 3,119 flagged, the port refuses 3,034;
+  the 85 it accepts are the two harmless kinds in `doc/parity.md` (24
+  empty-IDAT PNG calls; 61 JPEG calls flagged on the scalar build only,
+  which the default `sse2` port does not follow, and which the scalar port
+  refuses). The final bench (`ac97ea4`, best of 3): every row faster than
+  the original's SSE2 build, from 0.04 (BMP 24-bit) to 0.99 (PNM); closest
+  progressive JPEG 0.97 and JPEG 4:2:0 to RGBA 0.96.
+- **Left to do:** nothing in steps 1 to 7. Possible later work: the byte-
+  at-a-time paths no bench row covers (BMP masked and palette pixels, PSD
+  16-bit raw, TGA colour-mapped and RLE pixels); the progressive JPEG
+  decode (0.97); `file_test.` and `limits_test.` are not in
+  `tools/sanitize-all.sh`'s default list (their inputs are other tests'
+  files).
 - **Builds:** one at a time, under the memory cap, as
   `timeout 3000 systemd-run --user --scope -q -p MemoryMax=6G zig build <step> -j3`.
   The full test run peaks near 6 GB and takes about 6 minutes.
