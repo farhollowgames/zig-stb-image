@@ -75,50 +75,26 @@ performance pass, the skeptic's review, the fixes) are not started.
   load; `-Djpeg-idct` becomes `sse2` by default on x86-64 once a `@Vector`
   IDCT gives the SSE2 mode's samples bit for bit. The performance target is
   no row slower than the original's SSE2 build.
-- **In progress on `review/perf-and-skeptic`** (step 5): three performance
-  agents, each on its own branch and worktree under
-  `~/Projects/zig-stb-image.wt/`, merged into `review/perf-and-skeptic`
-  when done: `perf/jpeg` (IDCT, YCbCr conversion, upsampling, the
-  `-Djpeg-idct` default), `perf/png` (unfiltering, palette expansion,
-  zlib), `perf/pixels` (the BMP zero-palette change first, then BMP, PSD,
-  TGA and the shared component conversion). Each kept change is one commit
-  whose message gives its benchmark gain; the oracle tests are not edited
-  for speed.
-- **Performance: JPEG** (`perf/jpeg`). Time port / original SSE2, best
-  of 3, full run at the end: 4:4:4 0.70, 4:2:0 0.52, 4:2:0 to rgba 0.96,
-  grey 0.52, progressive 0.92, ycck 0.73; every row below the original's
-  SSE2 build. The full test run passes (167 tests); the JPEG tests pass
-  in both `-Djpeg-idct` modes. Done:
-  the SSE2-mode IDCT on `@Vector` lanes; `-Djpeg-idct` defaults to `sse2`
-  on x86-64; `@Vector` YCbCr to RGB/RGBA with the YCCK blend; `@Vector`
-  2x2 (hv_2) upsampling; the bit reader's refill takes up to four bytes at
-  once; the baseline AC loop keeps the bit buffer in locals; the DC
-  overflow test multiplies instead of dividing; the scalar IDCT
-  (`-Djpeg-idct=scalar`) on eight lanes where no step can overflow (that
-  mode: 4:4:4 0.73, 4:2:0 0.55, rgba 1.02, grey 0.55, progressive 0.94,
-  ycck 0.79 against the SSE2 build; 0.36 to 0.66 against the scalar
-  build). Tried and dropped (no gain): the grey row as a `@memcpy`; the
-  refill's fast path inlined; a DC-only block filled without the IDCT; the
-  component buffers left unzeroed. Left, if more is wanted: rgba (0.96)
-  and progressive (0.92) are the closest rows; the port's RGBA costs what
-  its RGB does, so only a faster decode helps them (the progressive AC
-  loops could keep the bit buffer in locals as the baseline one does).
-  README's `-Djpeg-idct` line still says scalar by default (the lead's).
+- **Step 5 is done** on `review/perf-and-skeptic`: the JPEG, PNG and zlib,
+  and pixels passes (`perf/jpeg`, `perf/png`, `perf/pixels`, merged; their
+  subsections below). Every bench row is faster than the original's SSE2
+  build; the full test run passes (167 tests).
+- **In progress (step 6 and the sanitizer):** a skeptic agent reviews the
+  branch (findings come back to the lead; probes on `skeptic/probes`), and
+  another agent, on `review/sanitize` (worktree
+  `~/Projects/zig-stb-image.wt/sanitize`), makes `zig build sanitize` say
+  for each call the original is unsafe on whether the port refuses it, and
+  runs it over every test file.
 - **Left to do:**
-  1. Step 5, the performance pass, by an agent that did not write the port,
-     on branch `review/perf-and-skeptic`. Zig 0.17 never vectorizes loops,
-     so the original's SSE2 paths (JPEG IDCT, YCbCr conversion, 2x2
-     upsampling) and the loops clang vectorizes at -O3 (PNG unfiltering,
-     component conversion, PNG palette expansion) need explicit `@Vector`
-     code to keep up. Each change is kept only if the tests pass and the
-     benchmark gains.
-  2. Step 6, a skeptic agent that did not write the port, on the same
-     branch: untested features, weak comparisons, narrow fuzzing, a
-     benchmark that favours the port, undefined behaviour, overflow and
-     stale references.
-  3. Step 7, each confirmed finding fixed with a test that failed first;
-     then the tests, `zig build sanitize` and the benchmark again, and the
-     README's numbers updated.
+  1. Step 7: fix each confirmed skeptic finding with a test that fails
+     first; merge `review/sanitize` and act on any unsafe input the port
+     accepts.
+  2. Merge `main` (where another agent fixes the READMEs) into this branch,
+     then update README.md: `-Djpeg-idct` defaults to `sse2` on x86-64, the
+     BMP palette change, the "Not included" link (`#left-out-approved`),
+     the headline percentages from a fresh full bench, and
+     `doc/BENCHMARKS.md`'s results table.
+  3. Run the full tests, the sanitizer and the bench once more; push.
 - **Builds:** one at a time, under the memory cap, as
   `timeout 3000 systemd-run --user --scope -q -p MemoryMax=6G zig build <step> -j3`.
   The full test run peaks near 6 GB and takes about 6 minutes.
