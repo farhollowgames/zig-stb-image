@@ -736,6 +736,7 @@ const fuzz_config: fuzz.Config = .{
     .seed = 0xb3b0_f000,
     .cases = 3000,
     .unset_pixels = &bmp_unset_pixels,
+    .compare_unset = expectReadEntriesOfCase,
 };
 
 test "fuzz: mutated BMPs decode or fail as in the original" {
@@ -769,6 +770,109 @@ const bmp_unset_pixels = [_]u32{
     2383, 2396, 2414, 2524, 2599, 2629, 2630, 2670, 2702, 2727, 2763, 2893,
     2927,
 };
+
+/// For a fuzz case whose pixels name palette entries the original never
+/// reads: every pixel whose entry it reads is compared with both builds of
+/// the original, loaded from memory at the case's bit depth and options, and
+/// every other pixel must be zero, opaque where there is alpha. A copy of
+/// the case whose palette entries the original reads are all white tells
+/// the pixels apart: loaded, a pixel is white where its entry was read.
+fn expectReadEntriesOfCase(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    request: oracle.Request,
+    label: oracle.Label,
+) !void {
+    if (fuzz_options.sanitize) return;
+    const options = request.options;
+    if (bytes.len < 18) return error.TestUnexpectedResult;
+    // The palette follows the header; the original reads `psize` entries,
+    // counted from the offset as `stbi__bmp_load` counts them.
+    const offset: i64 = std.mem.readInt(i32, bytes[10..14], .little);
+    const header_size = std.mem.readInt(u32, bytes[14..18], .little);
+    const entry_size: usize = if (header_size == 12) 3 else 4;
+    const psize: i64 = if (header_size == 12)
+        @divTrunc(offset - 14 - 24, 3)
+    else
+        (offset - 14 - header_size) >> 2;
+    const marked = try allocator.dupe(u8, bytes);
+    defer allocator.free(marked);
+    for (0..@intCast(std.math.clamp(psize, 0, 256))) |i| {
+        for (0..3) |b| {
+            const at = 14 + header_size + i * entry_size + b;
+            if (at < marked.len) marked[at] = 0xff;
+        }
+    }
+    var white = try stbi.loadFromMemory(u8, allocator, marked, .{
+        .components = options.components,
+        .flip_vertically = options.flip_vertically,
+    });
+    defer white.deinit(allocator);
+    const n: usize = white.channels;
+    const pixel_count = white.pixels.len / n;
+
+    switch (request.bits) {
+        inline else => |bits| {
+            const T = switch (bits) {
+                .u8 => u8,
+                .u16 => u16,
+                .f32 => f32,
+            };
+            const opaque_alpha: T = switch (T) {
+                u8 => 255,
+                u16 => 0xffff,
+                f32 => 1.0,
+                else => unreachable,
+            };
+            var ours = try stbi.loadFromMemory(T, allocator, bytes, options);
+            defer ours.deinit(allocator);
+            try std.testing.expectEqual(white.pixels.len, ours.pixels.len);
+            const has_alpha = n == 2 or n == 4;
+            var read: usize = 0;
+            for (0..pixel_count) |i| {
+                if (white.pixels[i * n] != 0) {
+                    read += 1;
+                    continue;
+                }
+                const pixel = ours.pixels[i * n ..][0..n];
+                for (pixel, 0..) |sample, k| {
+                    const expected: T = if (has_alpha and k == n - 1) opaque_alpha else 0;
+                    if (!std.mem.eql(u8, std.mem.asBytes(&sample), std.mem.asBytes(&expected))) {
+                        label.print(request, "pixel {d} names an unset entry, is not zero", .{i});
+                        return error.TestUnexpectedResult;
+                    }
+                }
+            }
+            if (read == 0) return;
+            var settings = request.settings();
+            settings.via = @backingInt(oracle.Via.memory);
+            const bits_arg: c_int = switch (bits) {
+                .u8 => 8,
+                .u16 => 16,
+                .f32 => 32,
+            };
+            const ours_bytes = std.mem.sliceAsBytes(ours.pixels);
+            const pixel_bytes = n * @sizeOf(T);
+            for ([_]oracle.Path{ .simd, .scalar }) |path| {
+                var theirs: oracle.Result = undefined;
+                oracle.loadFn(path)(bytes.ptr, bytes.len, bits_arg, &settings, &theirs);
+                defer oracle.freeFn(path)(theirs.pixels);
+                const original: [*]const u8 = @ptrCast(theirs.pixels orelse {
+                    label.print(request, "{t}: the original fails from memory", .{path});
+                    return error.TestUnexpectedResult;
+                });
+                for (0..pixel_count) |i| {
+                    if (white.pixels[i * n] == 0) continue;
+                    const at = i * pixel_bytes;
+                    if (!std.mem.eql(u8, original[at..][0..pixel_bytes], ours_bytes[at..][0..pixel_bytes])) {
+                        label.print(request, "{t}: pixel {d}, whose entry is read, differs", .{ path, i });
+                        return error.TestUnexpectedResult;
+                    }
+                }
+            }
+        },
+    }
+}
 
 fn decodeAll(allocator: std.mem.Allocator, bytes: []const u8) !void {
     for ([_]stbi.Components{ .file, .grey, .rgba }) |components| {

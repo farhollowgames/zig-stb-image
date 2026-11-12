@@ -142,7 +142,15 @@ test that fails before the fix where there was a bug. One commit each.
    "Limits.bytes_max: a PNG's inflated data grows past it, as the
    original's grows past INT_MAX" (from the skeptic's probe, which
    expected the opposite).
-4. **Comparison holes:** not started.
+4. **Comparison holes: done.** (a) The BMP fuzz cases that name unset
+   palette entries now compare every pixel whose entry the original reads
+   with both builds, and require zero (opaque) for the others; a copy of
+   the case with every read entry white tells them apart
+   (`expectReadEntriesOfCase` in `test/bmp_test.zig`, through
+   `fuzz.Config.compare_unset`). (b) `oracle.expectQuerySame` runs both
+   builds and compares both reason forms. (c) Where the two builds give
+   different results on an input that is not a JPEG, the load fails the
+   test instead of following one build. All passed at once: no bug.
 5. **Hidden invariants in fast paths:** not started.
 6. **Benchmark rows through a reader and a file:** not started.
 7. **PNM 16-bit:** not started.

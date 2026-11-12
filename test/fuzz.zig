@@ -29,6 +29,9 @@ pub const Config = struct {
     /// reads from memory it never wrote: the port must decode them to the
     /// original's size and channels; the pixels are not compared.
     unset_pixels: []const u32 = &.{},
+    /// Compares the pixels of an `unset_pixels` case the original reads
+    /// from memory it wrote.
+    compare_unset: ?*const fn (std.mem.Allocator, []const u8, oracle.Request, oracle.Label) anyerror!void = null,
     /// Where the original's result depends on memory it never wrote, the
     /// port must refuse the case (`oracle.Expect.same_unless_unwritten`).
     refuse_unwritten: bool = false,
@@ -205,6 +208,9 @@ pub fn run(gpa: std.mem.Allocator, config: Config, inputs: []const []const u8) !
         else
             .same;
         try oracle.expectLoadSame(gpa, case.bytes, case.request, label, load_expect);
+        if (load_expect == .same_size) {
+            if (config.compare_unset) |compare| try compare(gpa, case.bytes, case.request, label);
+        }
         if (!unsafeCall(config, case_number, .info)) {
             try oracle.expectQuerySame(case.bytes, .info, .memory, label);
         }

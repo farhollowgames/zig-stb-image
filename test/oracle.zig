@@ -417,6 +417,15 @@ pub fn originalBuildsDisagree(bytes: []const u8, request: Request) bool {
     return buildsDisagree(results, request);
 }
 
+/// Whether `bytes` starts as stb_image's JPEG test wants: a start-of-image
+/// marker, after any number of fill bytes.
+fn isJpeg(bytes: []const u8) bool {
+    var k: usize = 0;
+    if (bytes.len == 0 or bytes[0] != 0xff) return false;
+    while (k < bytes.len and bytes[k] == 0xff) k += 1;
+    return k < bytes.len and bytes[k] == 0xd8;
+}
+
 /// Whether the two builds of the original give different results: one
 /// decodes and the other fails, or they decode to other sizes or bytes.
 fn buildsDisagree(results: [2]Result, request: Request) bool {
@@ -490,6 +499,11 @@ pub fn expectLoadSame(
     }
     defer for (paths, results) |path, theirs| freeFn(path)(theirs.pixels);
     const disagree = buildsDisagree(results, request);
+    if (disagree and !isJpeg(bytes)) {
+        // Only the JPEG decoder has code the two builds compile apart.
+        label.print(request, "the original's two builds disagree on an input that is not a JPEG", .{});
+        return error.TestUnexpectedResult;
+    }
 
     for (paths, results) |path, theirs| {
         if (disagree and path != followed_path) continue;
@@ -583,11 +597,6 @@ pub fn expectQuerySame(
     }
     defer if (files.tmp != null) tmp_file.deinit();
 
-    var settings = request.settings();
-    files.apply(&settings, 0);
-    var theirs: Result = undefined;
-    const r = queryFn(.simd)(bytes.ptr, bytes.len, @backingInt(query), &settings, &theirs);
-
     var buffer: [512]u8 = undefined;
     var reader: std.Io.Reader = .fixed(bytes);
     var file_reader: std.Io.File.Reader = undefined;
@@ -600,15 +609,37 @@ pub fn expectQuerySame(
     }
     const io = std.testing.io;
     const dir: std.Io.Dir = if (files.tmp) |t| t.tmp.dir else undefined;
-    switch (query) {
-        .info => {
-            const found: anyerror!stbi.Info = switch (via) {
-                .memory => stbi.infoFromMemory(bytes),
-                .callbacks => stbi.infoFromReader(&reader),
-                .file, .file_streaming => stbi.infoFromFile(&file_reader),
-                .path => stbi.infoFromPath(io, dir, TmpFile.name),
-            };
-            if (found) |info| {
+    const PortInfo = anyerror!stbi.Info;
+    const PortFlag = anyerror!bool;
+    const ours: union(enum) { info: PortInfo, flag: PortFlag } = switch (query) {
+        .info => .{ .info = switch (via) {
+            .memory => stbi.infoFromMemory(bytes),
+            .callbacks => stbi.infoFromReader(&reader),
+            .file, .file_streaming => stbi.infoFromFile(&file_reader),
+            .path => stbi.infoFromPath(io, dir, TmpFile.name),
+        } },
+        .is_16_bit, .is_hdr => .{ .flag = switch (via) {
+            .memory => if (query == .is_hdr) stbi.isHdrFromMemory(bytes) else stbi.is16BitFromMemory(bytes),
+            .callbacks => if (query == .is_hdr) stbi.isHdrFromReader(&reader) else stbi.is16BitFromReader(&reader),
+            .file, .file_streaming => if (query == .is_hdr)
+                stbi.isHdrFromFile(&file_reader)
+            else
+                stbi.is16BitFromFile(&file_reader),
+            .path => if (query == .is_hdr)
+                stbi.isHdrFromPath(io, dir, TmpFile.name)
+            else
+                stbi.is16BitFromPath(io, dir, TmpFile.name),
+        } },
+    };
+    const port_pos = if (via == .file) file_reader.logicalPos() else 0;
+
+    var settings = request.settings();
+    for ([_]Path{ .simd, .scalar }) |path| {
+        files.apply(&settings, 0);
+        var theirs: Result = undefined;
+        const r = queryFn(path)(bytes.ptr, bytes.len, @backingInt(query), &settings, &theirs);
+        switch (ours) {
+            .info => |found| if (found) |info| {
                 // The original's sizes are `int`s, which BMP and PSD fill
                 // with the stored 32 bits; the port reports the same bits.
                 const x: u32 = @bitCast(theirs.x);
@@ -616,44 +647,31 @@ pub fn expectQuerySame(
                 if (r == 0 or info.width != x or info.height != y or
                     info.channels_in_file != theirs.comp)
                 {
-                    label.print(request, "info: {d} {d}x{d}x{d} against the port's {d}x{d}x{d}", .{
-                        r, theirs.x, theirs.y, theirs.comp, info.width, info.height, info.channels_in_file,
+                    label.print(request, "{t} info: {d} {d}x{d}x{d} against the port's {d}x{d}x{d}", .{
+                        path,       r,           theirs.x,              theirs.y, theirs.comp,
+                        info.width, info.height, info.channels_in_file,
                     });
                     return error.TestUnexpectedResult;
                 }
             } else |err| {
-                if (r != 0 or !reasonMatches(err, theirs.reason, .simd)) {
-                    label.print(request, "info: {d} {d}x{d}x{d} \"{s}\" against the port's {t}", .{
-                        r, theirs.x, theirs.y, theirs.comp, theirs.reason orelse "(null)", err,
+                if (r != 0 or !reasonMatches(err, theirs.reason, path)) {
+                    label.print(request, "{t} info: {d} {d}x{d}x{d} \"{s}\" against the port's {t}", .{
+                        path, r, theirs.x, theirs.y, theirs.comp, theirs.reason orelse "(null)", err,
                     });
                     return error.TestUnexpectedResult;
                 }
-            }
-        },
-        .is_16_bit, .is_hdr => {
-            const found: anyerror!bool = switch (via) {
-                .memory => if (query == .is_hdr) stbi.isHdrFromMemory(bytes) else stbi.is16BitFromMemory(bytes),
-                .callbacks => if (query == .is_hdr) stbi.isHdrFromReader(&reader) else stbi.is16BitFromReader(&reader),
-                .file, .file_streaming => if (query == .is_hdr)
-                    stbi.isHdrFromFile(&file_reader)
-                else
-                    stbi.is16BitFromFile(&file_reader),
-                .path => if (query == .is_hdr)
-                    stbi.isHdrFromPath(io, dir, TmpFile.name)
-                else
-                    stbi.is16BitFromPath(io, dir, TmpFile.name),
-            };
-            const ours = try found;
-            if (ours != (r != 0)) {
-                label.print(request, "{t}: {d} against the port's {}", .{ query, r, ours });
-                return error.TestUnexpectedResult;
-            }
-        },
-    }
-    if (via == .file) {
-        if (file_reader.logicalPos() != theirs.pos_after) {
-            label.print(request, "{t}: the file is left at {d}, by the port at {d}", .{
-                query, theirs.pos_after, file_reader.logicalPos(),
+            },
+            .flag => |found| {
+                const flag = try found;
+                if (flag != (r != 0)) {
+                    label.print(request, "{t} {t}: {d} against the port's {}", .{ path, query, r, flag });
+                    return error.TestUnexpectedResult;
+                }
+            },
+        }
+        if (via == .file and port_pos != theirs.pos_after) {
+            label.print(request, "{t} {t}: the file is left at {d}, by the port at {d}", .{
+                path, query, theirs.pos_after, port_pos,
             });
             return error.TestUnexpectedResult;
         }
