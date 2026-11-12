@@ -1,6 +1,6 @@
 .{
     .name = .stb_image,
-    .version = "0.0.0",
+    .version = "0.1.1",
     .fingerprint = 0xe5d360785ac00371, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
