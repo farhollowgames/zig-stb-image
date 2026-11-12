@@ -39,6 +39,7 @@ const Settings = extern struct {
     l2h_scale: f32 = 1.0,
     h2l_gamma: f32 = 2.2,
     h2l_scale: f32 = 1.0,
+    path: ?[*:0]const u8 = null,
 };
 
 const Result = extern struct {
@@ -86,8 +87,13 @@ const gpa = std.heap.c_allocator;
 
 const Sample = enum { u8, u16, f32 };
 
+/// Where a load reads its input: memory; a reader over it, against the
+/// original's callbacks; or an in-memory file, against the original's
+/// `FILE` on the same descriptor.
+const Via = enum(c_int) { memory = 0, reader = 1, file = 2 };
+
 const Kind = union(enum) {
-    load: struct { sample: Sample, components: stbi.Components = .file },
+    load: struct { sample: Sample, components: stbi.Components = .file, via: Via = .memory },
     gif,
     zlib,
 };
@@ -157,7 +163,22 @@ const rows = [_]Row{
     .{ .name = "gif first frame", .input = .gif, .kind = .{ .load = .{ .sample = .u8 } } },
     .{ .name = "gif every frame", .input = .gif, .kind = .gif },
     .{ .name = "zlib inflate", .input = .zlib, .kind = .zlib },
+    .{ .name = "png rgb via reader", .input = .png_rgb, .kind = .{ .load = .{ .sample = .u8, .via = .reader } } },
+    .{ .name = "png rgb via file", .input = .png_rgb, .kind = .{ .load = .{ .sample = .u8, .via = .file } } },
+    .{ .name = "jpeg 4:2:0 via reader", .input = .jpeg_420, .kind = .{ .load = .{ .sample = .u8, .via = .reader } } },
+    .{ .name = "jpeg 4:2:0 via file", .input = .jpeg_420, .kind = .{ .load = .{ .sample = .u8, .via = .file } } },
+    .{ .name = "bmp 24-bit via reader", .input = .bmp_24, .kind = .{ .load = .{ .sample = .u8, .via = .reader } } },
+    .{ .name = "bmp 24-bit via file", .input = .bmp_24, .kind = .{ .load = .{ .sample = .u8, .via = .file } } },
+    .{ .name = "psd raw via reader", .input = .psd_raw, .kind = .{ .load = .{ .sample = .u8, .via = .reader } } },
+    .{ .name = "psd raw via file", .input = .psd_raw, .kind = .{ .load = .{ .sample = .u8, .via = .file } } },
+    .{ .name = "psd rle via reader", .input = .psd_rle, .kind = .{ .load = .{ .sample = .u8, .via = .reader } } },
+    .{ .name = "psd rle via file", .input = .psd_rle, .kind = .{ .load = .{ .sample = .u8, .via = .file } } },
 };
+
+/// For the rows that load from a file: each input in an in-memory file,
+/// and the `Io` the port's file reader needs.
+var input_files: std.EnumArray(Input, std.posix.fd_t) = .initFill(-1);
+var bench_io: std.Io = undefined;
 
 // --- The two sides ------------------------------------------------------------
 
@@ -200,9 +221,25 @@ fn decode(side: Side, row: *const Row, input: []const u8) Output {
                             .u16 => u16,
                             .f32 => f32,
                         };
-                        const image = stbi.loadFromMemory(T, gpa, input, .{
-                            .components = load.components,
-                        }) catch |err| std.debug.panic("{s}: the port fails: {t}", .{ row.name, err });
+                        const options: stbi.Options = .{ .components = load.components };
+                        const result = switch (load.via) {
+                            .memory => stbi.loadFromMemory(T, gpa, input, options),
+                            .reader => blk: {
+                                var reader: std.Io.Reader = .fixed(input);
+                                break :blk stbi.loadFromReader(T, gpa, &reader, options);
+                            },
+                            .file => blk: {
+                                const file: std.Io.File = .{
+                                    .handle = input_files.get(row.input),
+                                    .flags = .{ .nonblocking = false },
+                                };
+                                var buffer: [4096]u8 = undefined;
+                                var file_reader = file.reader(bench_io, &buffer);
+                                break :blk stbi.loadFromFile(T, gpa, &file_reader, options);
+                            },
+                        };
+                        const image = result catch |err|
+                            std.debug.panic("{s}: the port fails: {t}", .{ row.name, err });
                         return .{
                             .bytes = std.mem.sliceAsBytes(image.pixels),
                             .units = @as(usize, image.width) * image.height,
@@ -210,7 +247,15 @@ fn decode(side: Side, row: *const Row, input: []const u8) Output {
                     },
                 }
             }
-            const settings: Settings = .{ .req_comp = @backingInt(load.components) };
+            var settings: Settings = .{
+                .req_comp = @backingInt(load.components),
+                .via = @backingInt(load.via),
+            };
+            if (load.via == .file) {
+                // The original reads from the descriptor's own offset.
+                settings.fd = input_files.get(row.input);
+                _ = std.os.linux.lseek(settings.fd, 0, std.os.linux.SEEK.SET);
+            }
             var result: Result = undefined;
             const f: *const LoadFn = if (side == .original) &simd_load else &scalar_load;
             f(input.ptr, input.len, bitsOf(load.sample), &settings, &result);
@@ -624,6 +669,14 @@ fn zlibStream(photo: Photo) ![]u8 {
     return compressed.toOwnedSlice();
 }
 
+/// `bytes` in an in-memory file.
+fn memFile(io: std.Io, bytes: []const u8) !std.posix.fd_t {
+    const fd = try std.posix.memfd_create("stb-image-bench", 0);
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    try file.writePositionalAll(io, bytes, 0);
+    return fd;
+}
+
 fn prepare(io: std.Io) !std.EnumArray(Input, []const u8) {
     const photo = try loadPhoto(io);
     const grey = try withComponents(photo, 1);
@@ -652,6 +705,10 @@ fn prepare(io: std.Io) !std.EnumArray(Input, []const u8) {
     inputs.set(.pnm_16, try pnmFile(photo, true));
     inputs.set(.gif, try readFile(io, bench_paths.gif));
     inputs.set(.zlib, try zlibStream(photo));
+    for (rows) |row| {
+        if (row.kind != .load or row.kind.load.via != .file) continue;
+        if (input_files.get(row.input) < 0) input_files.set(row.input, try memFile(io, inputs.get(row.input)));
+    }
     return inputs;
 }
 
@@ -683,6 +740,7 @@ fn parseOptions(args: []const [:0]const u8) !Options {
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    bench_io = io;
     const options = try parseOptions(try init.minimal.args.toSlice(init.arena.allocator()));
     const inputs = try prepare(io);
     const scratch = try gpa.alloc(f64, sides.len * options.samples);
