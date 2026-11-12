@@ -118,3 +118,75 @@ test "skeptic: loadFromPath decodes a PNG followed by bytes it does not read" {
     defer image.deinit(gpa);
     try std.testing.expectEqualSlices(u8, expected.pixels, image.pixels);
 }
+
+const deflate = @import("deflate.zig");
+
+/// Records the largest single block asked of it.
+const Largest = struct {
+    child: std.mem.Allocator,
+    largest: usize = 0,
+
+    fn allocator(l: *Largest) std.mem.Allocator {
+        return .{ .ptr = l, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.largest = @max(l.largest, len);
+        return l.child.rawAlloc(len, a, ra);
+    }
+    fn resize(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) bool {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        const ok = l.child.rawResize(m, a, n, ra);
+        if (ok) l.largest = @max(l.largest, n);
+        return ok;
+    }
+    fn remap(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, n: usize, ra: usize) ?[*]u8 {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        const p = l.child.rawRemap(m, a, n, ra);
+        if (p != null) l.largest = @max(l.largest, n);
+        return p;
+    }
+    fn free(ctx: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
+        const l: *Largest = @ptrCast(@alignCast(ctx));
+        l.child.rawFree(m, a, ra);
+    }
+};
+
+test "skeptic: Limits.bytes_max bounds what a PNG decode allocates" {
+    // A 1x1 grey PNG whose IDAT inflates to about 64 MiB: one fixed-Huffman
+    // block of a literal and then matches of 258 at distance 1.
+    var w: deflate.BitWriter = .init(gpa);
+    defer w.deinit();
+    try w.byte(0x78);
+    try w.byte(0x01);
+    try w.bits(1, 1); // final
+    try w.bits(1, 2); // fixed Huffman
+    try w.code(0x30, 8); // literal 0
+    for (0..(64 << 20) / 258) |_| {
+        try w.code(0b11000101, 8); // length 258
+        try w.code(0, 5); // distance 1
+    }
+    try w.code(0, 7); // end of block
+    const stream = try w.finish();
+    defer gpa.free(stream);
+    const header = png_file.ihdr(.{ .width = 1, .height = 1 });
+    const bytes = try png_file.file(gpa, &.{
+        .{ .kind = "IHDR", .data = &header },
+        .{ .kind = "IDAT", .data = stream },
+        .{ .kind = "IEND" },
+    });
+    defer gpa.free(bytes);
+    var largest: Largest = .{ .child = gpa };
+    const limit = 1 << 20;
+    var image = try stbi.loadFromMemory(u8, largest.allocator(), bytes, .{
+        .limits = .{ .bytes_max = limit },
+    });
+    defer image.deinit(largest.allocator());
+    std.debug.print("\nlargest block: {d} bytes, bytes_max {d}\n", .{ largest.largest, limit });
+    try std.testing.expect(largest.largest <= limit);
+}
