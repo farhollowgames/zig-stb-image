@@ -67,9 +67,22 @@ performance pass, the skeptic's review, the fixes) are not started.
   each format against the original. `doc/parity.md` lists every input the
   port refuses where the original is unsafe; `doc/TESTING.md` and
   `doc/BENCHMARKS.md` describe the tests and the benchmark.
-- **Awaiting the author:** the items marked "awaiting the author's approval"
-  below: the build switches left out, and each refusal of an input the
-  original is unsafe on.
+- **The author's decisions (12 November 2026):** the build switches are
+  left out as listed; every refusal in `doc/parity.md` is approved, except
+  that a BMP palette index past the entries the original reads now reads as
+  zero (black), so the OS/2 BMPs whose palette the original reads short
+  load; `-Djpeg-idct` becomes `sse2` by default on x86-64 once a `@Vector`
+  IDCT gives the SSE2 mode's samples bit for bit. The performance target is
+  no row slower than the original's SSE2 build.
+- **In progress on `review/perf-and-skeptic`** (step 5): three performance
+  agents, each on its own branch and worktree under
+  `~/Projects/zig-stb-image.wt/`, merged into `review/perf-and-skeptic`
+  when done: `perf/jpeg` (IDCT, YCbCr conversion, upsampling, the
+  `-Djpeg-idct` default), `perf/png` (unfiltering, palette expansion,
+  zlib), `perf/pixels` (the BMP zero-palette change first, then BMP, PSD,
+  TGA and the shared component conversion). Each kept change is one commit
+  whose message gives its benchmark gain; the oracle tests are not edited
+  for speed.
 - **Left to do:**
   1. Step 5, the performance pass, by an agent that did not write the port,
      on branch `review/perf-and-skeptic`. Zig 0.17 never vectorizes loops,
@@ -150,18 +163,18 @@ performance pass, the skeptic's review, the fixes) are not started.
 | `STBI_NO_JPEG` … `STBI_NO_PNM`, `STBI_ONLY_JPEG` … `STBI_ONLY_PNM` | `-Djpeg=false` and so on: a format left out is never detected | ported |
 | `STBI_MAX_DIMENSIONS` | `Options.limits.dimension_max` | ported |
 | `STBI_FAILURE_USERMSG` | `failureMessage(err)` | ported |
-| `STBI_NO_FAILURE_STRINGS` | none: the strings are compiled only where `failureReason` or `failureMessage` is called | awaiting the author's approval |
-| `STBI_NO_STDIO` | none: the file functions are compiled only where called | awaiting the author's approval |
-| `STBI_NO_LINEAR`, `STBI_NO_HDR`'s float half | none: the float functions are compiled only where called | awaiting the author's approval |
-| `STBI_SUPPORT_ZLIB`, `STBI_NO_ZLIB` | none: `zlib` is compiled only where used | awaiting the author's approval |
+| `STBI_NO_FAILURE_STRINGS` | none: the strings are compiled only where `failureReason` or `failureMessage` is called | left out (approved) |
+| `STBI_NO_STDIO` | none: the file functions are compiled only where called | left out (approved) |
+| `STBI_NO_LINEAR`, `STBI_NO_HDR`'s float half | none: the float functions are compiled only where called | left out (approved) |
+| `STBI_SUPPORT_ZLIB`, `STBI_NO_ZLIB` | none: `zlib` is compiled only where used | left out (approved) |
 | `STBI_MALLOC`, `STBI_REALLOC`, `STBI_REALLOC_SIZED`, `STBI_FREE` | the `std.mem.Allocator` each call takes | ported |
 | `STBI_ASSERT` | Zig's safety checks | ported |
-| `STBI_NO_SIMD`, `STBI_SSE2`, `STBI_NEON` | `-Djpeg-idct=scalar` (default) or `sse2`: the JPEG IDCT whose samples to give where the two differ; no SIMD code yet (see "Left out") | awaiting the author's approval |
-| `STBI_NO_THREAD_LOCALS` | none: Zig has `threadlocal` on every target the port builds for | awaiting the author's approval |
-| `STBI_WINDOWS_UTF8`, `stbi_convert_wchar_to_utf8` | none: Zig paths are UTF-8 on Windows already | awaiting the author's approval |
-| `STB_IMAGE_STATIC`, `STBIDEF`, `STB_IMAGE_IMPLEMENTATION` | none: C linkage only | awaiting the author's approval |
+| `STBI_NO_SIMD`, `STBI_SSE2`, `STBI_NEON` | `-Djpeg-idct=scalar` (default) or `sse2`: the JPEG IDCT whose samples to give where the two differ; no SIMD code yet (see "Left out") | left out (approved) |
+| `STBI_NO_THREAD_LOCALS` | none: Zig has `threadlocal` on every target the port builds for | left out (approved) |
+| `STBI_WINDOWS_UTF8`, `stbi_convert_wchar_to_utf8` | none: Zig paths are UTF-8 on Windows already | left out (approved) |
+| `STB_IMAGE_STATIC`, `STBIDEF`, `STB_IMAGE_IMPLEMENTATION` | none: C linkage only | left out (approved) |
 
-## Left out (awaiting the author's approval)
+## Left out (approved)
 
 Where the port departs from the original. `doc/parity.md` has the detail and
 the tests of each case where the original is unsafe or never returns.

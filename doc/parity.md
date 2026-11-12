@@ -4,8 +4,8 @@ The port gives the original's result on every input the original handles
 safely. Where the original reads out of bounds, reads uninitialized memory,
 frees twice or is otherwise undefined, the port returns an error instead.
 Each such case has a test, and the fuzz tests list the cases they generate
-in their `.unsafe` lists (`test/<format>_unsafe.zig`). Each case is awaiting
-the author's approval.
+in their `.unsafe` lists (`test/<format>_unsafe.zig`). The author has
+approved each case.
 
 ## zlib
 
