@@ -126,16 +126,20 @@ before and after are from the same session.
   source's buffer (`Source.takeBuffered`): bmp 24-bit 1.80 to 0.06, bmp
   32-bit 2.07 to 0.05. PSD white-matte removal 16 pixels at a time (tests
   pass): psd raw 1.21 to 1.11, psd rle 1.33 to 1.32. TGA red-blue swap 16
-  pixels at a time: tga raw 1.02 to 0.28, tga rle 1.02 to 0.97.
-- **Now:** bmp 24-bit 0.06, bmp 32-bit 0.05, psd raw 1.11, psd rle 1.32,
+  pixels at a time: tga raw 1.02 to 0.28, tga rle 1.02 to 0.97. PSD raw
+  planes taken whole from the buffer and interleaved 16 pixels at a time:
+  psd raw 1.09 to 0.65.
+- **Now:** bmp 24-bit 0.06, bmp 32-bit 0.05, psd raw 0.65, psd rle 1.31,
   tga raw 0.28, tga rle 0.97, pnm 8-bit 1.03, pnm 16-bit 1.01 (PNM from
   the noisy first run).
 - **In the worktree, not committed:** the vertical flip in 64-byte chunks
   (`postprocess.verticalFlip`, shared by every format's flip): tga rle
   0.97 to 0.82; waits for a full test run before its commit.
-- **Next:** PSD raw: take all channel planes with `takeBuffered` and
-  interleave 16 pixels at a time with `@shuffle`; PSD RLE: literal runs
-  from the buffer; `convertFormat` (no row measures it yet: add one).
+- **Next:** PSD RLE: literal runs from the buffer; `convertFormat` (no row
+  measures it yet: add one).
+- **Found:** a two-operand `@shuffle` that interleaves two vectors
+  compiled to code twice as slow as the scalar loop; fixed-size `inline
+  for` loops over arrays vectorize well. One-operand shuffles are fast.
 - **Resume:** `stbi-build <worktree> bench -- --filter <format> --rounds 3`
   before and after each change; `test -Dtest-filter=<format>_test` after.
 

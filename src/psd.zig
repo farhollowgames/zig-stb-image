@@ -155,6 +155,20 @@ fn decodeRaw16(source: *Source, layout: Layout, out: []u16) Error!void {
 /// Raw 8 or 16-bit samples into 8-bit pixels, the top byte of a 16-bit
 /// sample.
 fn decodeRaw8(source: *Source, layout: Layout, out: []u8) Error!void {
+    const read: usize = @min(layout.channel_count, 4);
+    if (layout.bitdepth == 16) {
+        if (source.takeBuffered(2 * read * layout.pixel_count)) |planes| {
+            interleavePlanes(2, planes, read, out);
+            if (layout.channel_count >= 4) try removeWhiteMatte(u8, source, out);
+            return;
+        }
+    } else if (source.takeBuffered(read * layout.pixel_count)) |planes| {
+        interleavePlanes(1, planes, read, out);
+        if (layout.channel_count >= 4) try removeWhiteMatte(u8, source, out);
+        return;
+    }
+    // Planes past the buffer: one sample at a time, through the reader or
+    // as zeros past the end.
     for (0..4) |channel| {
         const samples = channelSamples(u8, out, channel);
         if (channel >= layout.channel_count) {
@@ -167,6 +181,42 @@ fn decodeRaw8(source: *Source, layout: Layout, out: []u8) Error!void {
         }
     }
     if (layout.channel_count >= 4) try removeWhiteMatte(u8, source, out);
+}
+
+/// `planes` holds `read` channels of `out.len / 4` samples of `size`
+/// bytes, big-endian; this puts each sample's top byte in its channel of
+/// the four-byte pixels of `out`, 16 pixels at a time. A channel past
+/// `read` is 0, or 255 for alpha.
+fn interleavePlanes(comptime size: usize, planes: []const u8, read: usize, out: []u8) void {
+    switch (read) {
+        inline 0...4 => |r| interleaveRead(size, r, planes, out),
+        else => unreachable,
+    }
+}
+
+fn interleaveRead(comptime size: usize, comptime read: usize, planes: []const u8, out: []u8) void {
+    const lanes = 16;
+    const pixel_count = out.len / 4;
+    const defaults = [4]u8{ 0, 0, 0, 255 };
+    var i: usize = 0;
+    // Fixed-size loops, which the compiler turns into vector code.
+    while (i + lanes <= pixel_count) : (i += lanes) {
+        var block: [4 * lanes]u8 = undefined;
+        inline for (0..4) |c| {
+            if (c < read) {
+                const samples = planes[(c * pixel_count + i) * size ..][0 .. lanes * size];
+                inline for (0..lanes) |k| block[k * 4 + c] = samples[k * size];
+            } else {
+                inline for (0..lanes) |k| block[k * 4 + c] = defaults[c];
+            }
+        }
+        out[i * 4 ..][0 .. lanes * 4].* = block;
+    }
+    for (i..pixel_count) |k| {
+        inline for (0..4) |c| {
+            out[k * 4 + c] = if (c < read) planes[(c * pixel_count + k) * size] else defaults[c];
+        }
+    }
 }
 
 /// PackBits data into 8-bit pixels. The original decodes bytes at either
