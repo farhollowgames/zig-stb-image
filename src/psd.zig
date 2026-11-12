@@ -193,6 +193,10 @@ fn decodeRle8(source: *Source, layout: Layout, out: []u8) Error!void {
 fn removeWhiteMatte(comptime T: type, source: *Source, out: []T) Error!void {
     const max: f32 = std.math.maxInt(T);
     var i: usize = 0;
+    while (i + 4 * matte_lanes <= out.len) : (i += 4 * matte_lanes) {
+        const block = out[i..][0 .. 4 * matte_lanes];
+        if (!removeWhiteMatteBlock(T, block)) return source.fail(error.PsdMatteOutOfRange);
+    }
     while (i < out.len) : (i += 4) {
         const pixel = out[i..][0..4];
         if (pixel[3] != 0 and pixel[3] != std.math.maxInt(T)) {
@@ -208,6 +212,71 @@ fn removeWhiteMatte(comptime T: type, source: *Source, out: []T) Error!void {
             }
         }
     }
+}
+
+/// The pixels `removeWhiteMatteBlock` works on at once.
+const matte_lanes = 16;
+
+/// The lanes of one channel of `matte_lanes` four-sample pixels.
+fn channelLanes(comptime channel: usize) @Vector(matte_lanes, i32) {
+    var mask: [matte_lanes]i32 = undefined;
+    for (&mask, 0..) |*m, k| m.* = @intCast(k * 4 + channel);
+    return mask;
+}
+
+/// Each pixel's lane of a channel, repeated over its four samples.
+const spread_lanes: @Vector(4 * matte_lanes, i32) = blk: {
+    var mask: [4 * matte_lanes]i32 = undefined;
+    for (&mask, 0..) |*m, j| m.* = @intCast(j / 4);
+    break :blk mask;
+};
+
+/// Which samples of `matte_lanes` pixels are of `channel`.
+fn isChannel(comptime channel: usize) @Vector(4 * matte_lanes, bool) {
+    var mask: [4 * matte_lanes]bool = undefined;
+    for (&mask, 0..) |*m, j| m.* = j % 4 == channel;
+    return mask;
+}
+
+/// `removeWhiteMatte` on `matte_lanes` pixels, with the same float steps in
+/// vector lanes. False when a result falls outside the sample's range.
+fn removeWhiteMatteBlock(comptime T: type, block: *[4 * matte_lanes]T) bool {
+    const Floats = @Vector(matte_lanes, f32);
+    const Samples = @Vector(matte_lanes, T);
+    const max: Floats = @splat(std.math.maxInt(T));
+    const pixels: @Vector(4 * matte_lanes, T) = block.*;
+    const alpha: Samples = @shuffle(T, pixels, undefined, channelLanes(3));
+    const partial = @select(
+        bool,
+        alpha != @as(Samples, @splat(0)),
+        alpha != @as(Samples, @splat(std.math.maxInt(T))),
+        @as(@Vector(matte_lanes, bool), @splat(false)),
+    );
+    if (!@reduce(.Or, partial)) return true;
+    const a = @as(Floats, @floatFromInt(alpha)) / max;
+    const ra = @as(Floats, @splat(1.0)) / a;
+    const inv_a = max * (@as(Floats, @splat(1.0)) - ra);
+    var result = pixels;
+    inline for (0..3) |channel| {
+        const samples: Samples = @shuffle(T, pixels, undefined, channelLanes(channel));
+        const floats: Floats = @floatFromInt(samples);
+        const value = floats * ra + inv_a;
+        // NaN fails both comparisons, as in the scalar check.
+        const in_range = @select(
+            bool,
+            value > @as(Floats, @splat(-1.0)),
+            value < max + @as(Floats, @splat(1.0)),
+            @as(@Vector(matte_lanes, bool), @splat(false)),
+        );
+        const bad = @select(bool, partial, !in_range, @as(@Vector(matte_lanes, bool), @splat(false)));
+        if (@reduce(.Or, bad)) return false;
+        // Opaque and fully transparent pixels keep their samples.
+        const converted: Samples = @intFromFloat(@select(f32, partial, value, floats));
+        const spread = @shuffle(T, converted, undefined, spread_lanes);
+        result = @select(T, isChannel(channel), spread, result);
+    }
+    block.* = result;
+    return true;
 }
 
 /// The size of the image, without decoding it; the components are always

@@ -124,11 +124,19 @@ Ratios are port time / original SSE2 time, `--rounds 3`, busy machine.
   to RGB(A) 16 pixels at a time with `@shuffle` when the row is in the
   source's buffer (`Source.takeBuffered`): bmp 24-bit 1.80 to 0.06, bmp
   32-bit 2.07 to 0.05.
-- **Now:** bmp 24-bit 0.06, bmp 32-bit 0.05, psd raw 1.30, psd rle 1.14,
-  tga raw 1.42, tga rle 1.00, pnm 8-bit 1.03, pnm 16-bit 1.01.
-- **Left:** PSD (vector white-matte removal, planar to interleaved copy,
-  PackBits runs from the buffer), TGA (BGR swap, flip), the vertical flip,
-  `convertFormat`.
+- **Work in progress (last commit):** PSD's white-matte removal 16 pixels
+  at a time in `@Vector` lanes, same float steps; psd raw 1.21 to 1.11, psd
+  rle 1.33 to 1.32 (same session). Committed while `test
+  -Dtest-filter=psd_test` was still running: rerun it first, and fix or
+  revert the commit if it fails.
+- **Now:** bmp 24-bit 0.06, bmp 32-bit 0.05, psd raw 1.11, psd rle 1.32,
+  tga raw 1.42, tga rle 1.00, pnm 8-bit 1.03, pnm 16-bit 1.01 (TGA, PNM
+  from the noisy first run).
+- **Next:** PSD raw: take all channel planes with `takeBuffered` and
+  interleave 16 pixels at a time with `@shuffle`; PSD RLE: literal runs
+  from the buffer, channel stores as vector read-modify-write; then TGA
+  (BGR swap with `@shuffle`, a vector vertical flip in `postprocess`), and
+  `convertFormat` (no row measures it yet: add one).
 - **Resume:** `stbi-build <worktree> bench -- --filter <format> --rounds 3`
   before and after each change; `test -Dtest-filter=<format>_test` after.
 
