@@ -102,7 +102,9 @@ pub fn tokenize(gpa: std.mem.Allocator, data: []const u8, window: usize) ![]Toke
                 const at: usize = @intCast(candidate);
                 if (pos - at > window) break;
                 var len: usize = 0;
-                while (len < 258 and pos + len < data.len and data[at + len] == data[pos + len]) len += 1;
+                while (len < 258 and pos + len < data.len and data[at + len] == data[pos + len]) {
+                    len += 1;
+                }
                 if (len > best_len) {
                     best_len = len;
                     best_dist = pos - at;
@@ -112,7 +114,10 @@ pub fn tokenize(gpa: std.mem.Allocator, data: []const u8, window: usize) ![]Toke
         }
         const step = if (best_len >= 3) best_len else 1;
         if (best_len >= 3) {
-            try tokens.append(gpa, .{ .match = .{ .len = @intCast(best_len), .dist = @intCast(best_dist) } });
+            try tokens.append(gpa, .{ .match = .{
+                .len = @intCast(best_len),
+                .dist = @intCast(best_dist),
+            } });
         } else {
             try tokens.append(gpa, .{ .literal = data[pos] });
         }
@@ -136,29 +141,45 @@ const length_base = [29]u16{
     3,  4,  5,  6,  7,  8,  9,  10, 11,  13,  15,  17,  19,  23,  27,
     31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
 };
-const length_extra = [29]u4{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0 };
+const length_extra = [29]u4{
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+};
 const distance_base = [30]u16{
     1,   2,   3,   4,   5,   7,    9,    13,   17,   25,   33,   49,   65,    97,    129,
     193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 };
-const distance_extra = [30]u4{ 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
+const distance_extra = [30]u4{
+    0, 0, 0, 0, 1, 1, 2, 2,  3,  3,  4,  4,  5,  5,  6,
+    6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
+};
 
 /// The length symbol (257..285) and its extra bits for a match length.
 pub fn lengthSymbol(len: u16) struct { symbol: u16, extra: u16, extra_bits: u4 } {
     var i: usize = 28;
     while (length_base[i] > len) i -= 1;
-    return .{ .symbol = @intCast(257 + i), .extra = len - length_base[i], .extra_bits = length_extra[i] };
+    return .{
+        .symbol = @intCast(257 + i),
+        .extra = len - length_base[i],
+        .extra_bits = length_extra[i],
+    };
 }
 
 pub fn distanceSymbol(dist: u16) struct { symbol: u16, extra: u16, extra_bits: u4 } {
     var i: usize = 29;
     while (distance_base[i] > dist) i -= 1;
-    return .{ .symbol = @intCast(i), .extra = dist - distance_base[i], .extra_bits = distance_extra[i] };
+    return .{
+        .symbol = @intCast(i),
+        .extra = dist - distance_base[i],
+        .extra_bits = distance_extra[i],
+    };
 }
 
 pub fn fixedLengths() [288]u8 {
     var lengths: [288]u8 = undefined;
-    for (&lengths, 0..) |*len, i| len.* = if (i <= 143) 8 else if (i <= 255) 9 else if (i <= 279) 7 else 8;
+    for (&lengths, 0..) |*len, i| {
+        len.* = if (i <= 143) 8 else if (i <= 255) 9 else if (i <= 279) 7 else 8;
+    }
     return lengths;
 }
 
@@ -198,7 +219,13 @@ pub fn compress(gpa: std.mem.Allocator, data: []const u8, options: Options) ![]u
 }
 
 /// One block of `data`, of `kind`.
-pub fn writeBlock(w: *BitWriter, data: []const u8, final: bool, kind: BlockKind, window: usize) !void {
+pub fn writeBlock(
+    w: *BitWriter,
+    data: []const u8,
+    final: bool,
+    kind: BlockKind,
+    window: usize,
+) !void {
     try w.bits(@intFromBool(final), 1);
     switch (kind) {
         .stored => {
@@ -250,7 +277,14 @@ pub fn writeBlock(w: *BitWriter, data: []const u8, final: bool, kind: BlockKind,
             canonical(lit_lengths[0..hlit], codes[0..hlit]);
             var distance_codes: [30]u16 = undefined;
             canonical(dist_lengths[0..hdist], distance_codes[0..hdist]);
-            try writeTokens(w, tokens, lit_lengths[0..hlit], codes[0..hlit], dist_lengths[0..hdist], distance_codes[0..hdist]);
+            try writeTokens(
+                w,
+                tokens,
+                lit_lengths[0..hlit],
+                codes[0..hlit],
+                dist_lengths[0..hdist],
+                distance_codes[0..hdist],
+            );
         },
     }
 }

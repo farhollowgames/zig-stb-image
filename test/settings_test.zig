@@ -21,12 +21,18 @@ fn set(flag: Flag, thread: bool, value: bool) void {
     oracle.upstream.simd_set_flag(@backingInt(flag), @intFromBool(thread), @intFromBool(value));
     oracle.upstream.scalar_set_flag(@backingInt(flag), @intFromBool(thread), @intFromBool(value));
     switch (flag) {
-        .flip => if (thread) settings.setFlipVerticallyOnLoadThread(value) else settings.setFlipVerticallyOnLoad(value),
+        .flip => if (thread)
+            settings.setFlipVerticallyOnLoadThread(value)
+        else
+            settings.setFlipVerticallyOnLoad(value),
         .unpremultiply => if (thread)
             settings.setUnpremultiplyOnLoadThread(value)
         else
             settings.setUnpremultiplyOnLoad(value),
-        .iphone => if (thread) settings.convertIphonePngToRgbThread(value) else settings.convertIphonePngToRgb(value),
+        .iphone => if (thread)
+            settings.convertIphonePngToRgbThread(value)
+        else
+            settings.convertIphonePngToRgb(value),
     }
 }
 
@@ -101,7 +107,7 @@ fn threadB(script: *Script) void {
     script.done();
 }
 
-test "settings: a thread's own setting wins on that thread, and other threads see the process-wide one, as in the original" {
+test "settings: a thread's own flag wins there, and other threads see the process-wide one" {
     if (fuzz_options.sanitize) return;
     defer {
         set(.flip, false, false);
@@ -133,11 +139,13 @@ fn loadWithThreadSettings(bytes: []const u8) !void {
     var image = try stbi.loadFromMemory(u8, gpa, bytes, settings.current());
     defer image.deinit(gpa);
 
-    const request: oracle.Settings = .{ .flip_thread = 1, .iphone_thread = 1, .unpremultiply_thread = 1 };
-    for ([_]*const fn ([*]const u8, usize, c_int, *const oracle.Settings, *oracle.Result) callconv(.c) void{
-        &oracle.upstream.simd_load,
-        &oracle.upstream.scalar_load,
-    }) |load| {
+    const request: oracle.Settings = .{
+        .flip_thread = 1,
+        .iphone_thread = 1,
+        .unpremultiply_thread = 1,
+    };
+    const Load = @TypeOf(oracle.upstream.simd_load);
+    for ([_]*const Load{ &oracle.upstream.simd_load, &oracle.upstream.scalar_load }) |load| {
         var out: oracle.Result = undefined;
         load(bytes.ptr, bytes.len, 8, &request, &out);
         defer oracle.upstream.simd_free(out.pixels);

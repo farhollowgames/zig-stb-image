@@ -30,12 +30,21 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
     const out_n: u3 = @intCast(source.img_out_n);
     const x = source.img_x;
     const y = source.img_y;
-    var pixels: common.Pixels = if (samples.wide) .{ .u16 = samples.wideSlice() } else .{ .u8 = samples.bytes };
+    var pixels: common.Pixels = if (samples.wide)
+        .{ .u16 = samples.wideSlice() }
+    else
+        .{ .u8 = samples.bytes };
     if (req_comp != 0 and req_comp != out_n) {
         pixels = switch (pixels) {
-            .u8 => |bytes| .{
-                .u8 = try common.convertFormat(gpa, request.options.limits, bytes, out_n, req_comp, x, y),
-            },
+            .u8 => |bytes| .{ .u8 = try common.convertFormat(
+                gpa,
+                request.options.limits,
+                bytes,
+                out_n,
+                req_comp,
+                x,
+                y,
+            ) },
             .u16 => |wide| .{ .u16 = try common.convertFormat16(gpa, wide, out_n, req_comp, x, y) },
             .f32 => unreachable,
         };
@@ -119,7 +128,9 @@ const Samples = struct {
     wide: bool,
 
     fn alloc(gpa: std.mem.Allocator, len: usize, wide: bool) Error!Samples {
-        if (wide) return .{ .bytes = std.mem.sliceAsBytes(try gpa.alloc(u16, len / 2)), .wide = true };
+        if (wide) {
+            return .{ .bytes = std.mem.sliceAsBytes(try gpa.alloc(u16, len / 2)), .wide = true };
+        }
         return .{ .bytes = try gpa.alloc(u8, len), .wide = false };
     }
 
@@ -222,7 +233,8 @@ const Png = struct {
                     interlace = interlace_method == 1;
                     if (s.img_x == 0 or s.img_y == 0) return s.fail(error.ZeroPixelPng);
                     if (pal_img_n == 0) {
-                        const n: u32 = (if (color & 2 != 0) @as(u32, 3) else 1) + (if (color & 4 != 0) @as(u32, 1) else 0);
+                        const colour_n: u32 = if (color & 2 != 0) 3 else 1;
+                        const n: u32 = colour_n + @intFromBool(color & 4 != 0);
                         s.img_n = @intCast(n);
                         if ((1 << 30) / s.img_x / n < s.img_y) return s.fail(error.ImageTooLarge);
                     } else {
@@ -260,7 +272,8 @@ const Png = struct {
                         for (0..length) |i| palette[i * 4 + 3] = s.get8();
                     } else {
                         if (s.img_n & 1 == 0) return s.fail(error.TrnsWithAlpha);
-                        if (length != @as(u32, @intCast(s.img_n)) * 2) return s.fail(error.BadTrnsLength);
+                        const key_length = @as(u32, @intCast(s.img_n)) * 2;
+                        if (length != key_length) return s.fail(error.BadTrnsLength);
                         has_trans = true;
                         // A colour key gives the image an alpha channel.
                         if (scan == .header) {
@@ -290,7 +303,8 @@ const Png = struct {
                     }
                     if (length > 1 << 30) return s.fail(error.IdatSizeLimit);
                     // The original's `int` sum would turn negative.
-                    if (png.idata.items.len + length > std.math.maxInt(i32)) return s.staleFailure();
+                    const total = png.idata.items.len + length;
+                    if (total > std.math.maxInt(i32)) return s.staleFailure();
                     if (length > 0) png.has_idata = true;
                     try png.readIdat(length);
                 },
@@ -387,7 +401,8 @@ const Png = struct {
             s.img_out_n = @intCast(img_n);
         }
         const out_n: u32 = @intCast(s.img_out_n);
-        png.out = try png.createImage(expanded.buffer[0..expanded.len], out_n, d.color, d.interlace);
+        const inflated = expanded.buffer[0..expanded.len];
+        png.out = try png.createImage(inflated, out_n, d.color, d.interlace);
         const out = png.out.?;
         const pixel_count = @as(usize, s.img_x) * s.img_y;
         if (d.has_trans) {
@@ -412,7 +427,13 @@ const Png = struct {
 
     /// `stbi__create_png_image`: the image, de-interlaced if it is
     /// interlaced, with `out_n` components.
-    fn createImage(png: *Png, data: []const u8, out_n: u32, color: u8, interlaced: bool) Error!Samples {
+    fn createImage(
+        png: *Png,
+        data: []const u8,
+        out_n: u32,
+        color: u8,
+        interlaced: bool,
+    ) Error!Samples {
         const s = png.source;
         if (!interlaced) return png.createImageRaw(data, out_n, s.img_x, s.img_y, color);
 
@@ -471,7 +492,14 @@ const Png = struct {
     /// `stbi__create_png_image_raw`: unfilters `y` rows of `x` pixels from
     /// `raw` into an image of `out_n` components, adding opaque alpha when
     /// `out_n` is one more than the file's.
-    fn createImageRaw(png: *Png, raw: []const u8, out_n: u32, x: u32, y: u32, color: u8) Error!Samples {
+    fn createImageRaw(
+        png: *Png,
+        raw: []const u8,
+        out_n: u32,
+        x: u32,
+        y: u32,
+        color: u8,
+    ) Error!Samples {
         const s = png.source;
         const limits = png.options.limits;
         const depth: u32 = png.depth;
@@ -480,10 +508,13 @@ const Png = struct {
         const output_bytes = out_n * bytes;
         const stride = @as(usize, x) * output_bytes;
 
-        if (!common.sizesValid(limits, &.{ x, y, output_bytes }, 0)) return s.fail(error.OutOfMemory);
+        if (!common.sizesValid(limits, &.{ x, y, output_bytes }, 0)) {
+            return s.fail(error.OutOfMemory);
+        }
         if (!common.sizesValid(limits, &.{ img_n, x, depth }, 7)) return s.fail(error.TooLargePng);
         const img_width_bytes: usize = (@as(usize, img_n) * x * depth + 7) >> 3;
-        if (!common.sizesValid(limits, &.{ @intCast(img_width_bytes), y }, @intCast(img_width_bytes))) {
+        const width_bytes: i64 = @intCast(img_width_bytes);
+        if (!common.sizesValid(limits, &.{ width_bytes, y }, width_bytes)) {
             return s.fail(error.TooLargePng);
         }
         const img_len = (img_width_bytes + 1) * y;
@@ -510,7 +541,10 @@ const Png = struct {
             const filter_byte = raw[raw_pos];
             raw_pos += 1;
             if (filter_byte > 4) return s.fail(error.InvalidPngFilter);
-            const filter: Filter = if (j == 0) first_row_filter[filter_byte] else @fromBackingInt(filter_byte);
+            const filter: Filter = if (j == 0)
+                first_row_filter[filter_byte]
+            else
+                @fromBackingInt(filter_byte);
             const in = raw[raw_pos..][0..row_bytes];
             unfilter(filter, cur, prior, in, filter_bytes);
             raw_pos += row_bytes;
@@ -541,7 +575,12 @@ const Png = struct {
 
     /// `stbi__expand_png_palette`: each index replaced by its palette
     /// entry's first `pal_img_n` components.
-    fn expandPalette(png: *Png, palette: *const [1024]u8, palette_set: u32, pal_img_n: u32) Error!void {
+    fn expandPalette(
+        png: *Png,
+        palette: *const [1024]u8,
+        palette_set: u32,
+        pal_img_n: u32,
+    ) Error!void {
         const s = png.source;
         const pixel_count = @as(usize, s.img_x) * s.img_y;
         if (!common.sizesValid(png.options.limits, &.{ @intCast(pixel_count), pal_img_n }, 0)) {
@@ -562,7 +601,15 @@ const Png = struct {
     }
 };
 
-fn unfilter(filter: Filter, cur: []u8, prior: []const u8, in: []const u8, filter_bytes: usize) void {
+/// Undoes `filter` on one row: `in` into `cur`, with `prior` the row
+/// above and `filter_bytes` the distance to the byte on the left.
+fn unfilter(
+    filter: Filter,
+    cur: []u8,
+    prior: []const u8,
+    in: []const u8,
+    filter_bytes: usize,
+) void {
     const nk = cur.len;
     switch (filter) {
         .none => @memcpy(cur, in),

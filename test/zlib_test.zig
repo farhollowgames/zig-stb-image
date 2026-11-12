@@ -56,6 +56,11 @@ fn expectSame(input: []const u8, call: Call, label: []const u8) !void {
     const buffer_theirs = whole_theirs[0..call.buffer_len];
     const buffer_ours = whole_ours[0..call.buffer_len];
 
+    if (fuzz_options.sanitize) {
+        std.debug.print("stbi-case: {s} call zlib {t} | initial {d} header {} buffer {d}\n", .{
+            label, call.function, call.initial_size, call.parse_header, call.buffer_len,
+        });
+    }
     var outlen: c_int = 0;
     var reason: ?[*:0]const u8 = null;
     const returned = oracle.upstream.simd_zlib(
@@ -73,7 +78,10 @@ fn expectSame(input: []const u8, call: Call, label: []const u8) !void {
     if (fuzz_options.sanitize) return;
 
     const theirs: Outcome = if (call.function.isBuffer())
-        (if (outlen >= 0) .{ .bytes = buffer_theirs[0..@intCast(outlen)] } else .{ .failure = span(reason) })
+        (if (outlen >= 0)
+            .{ .bytes = buffer_theirs[0..@intCast(outlen)] }
+        else
+            .{ .failure = span(reason) })
     else if (returned) |p|
         .{ .bytes = p[0..@intCast(outlen)] }
     else
@@ -89,11 +97,12 @@ fn expectSame(input: []const u8, call: Call, label: []const u8) !void {
             .parse_header = call.parse_header,
         }),
         .noheader_malloc => zlib.decodeAlloc(gpa, input, .{ .parse_header = false }),
-        .buffer => if (zlib.decodeBuffer(buffer_ours, input, .{})) |n| buffer_ours[0..n] else |err| err,
-        .noheader_buffer => if (zlib.decodeBuffer(buffer_ours, input, .{ .parse_header = false })) |n|
-            buffer_ours[0..n]
-        else |err|
-            err,
+        .buffer, .noheader_buffer => blk: {
+            const header = call.function == .buffer;
+            const n = zlib.decodeBuffer(buffer_ours, input, .{ .parse_header = header }) catch |err|
+                break :blk err;
+            break :blk buffer_ours[0..n];
+        },
     };
     const ours: Outcome = if (result) |bytes| blk: {
         if (!call.function.isBuffer()) owned = @constCast(bytes);
@@ -103,13 +112,15 @@ fn expectSame(input: []const u8, call: Call, label: []const u8) !void {
     switch (theirs) {
         .bytes => |bytes| switch (ours) {
             .bytes => |port_bytes| if (std.mem.indexOfDiff(u8, bytes, port_bytes)) |at| {
-                std.debug.print("\n[{s}] {t}: {d} bytes against the port's {d}, first difference at {d}\n", .{
+                std.debug.print("\n[{s}] {t}: {d} bytes against the port's {d}, " ++
+                    "first difference at {d}\n", .{
                     label, call.function, bytes.len, port_bytes.len, at,
                 });
                 return error.TestUnexpectedResult;
             },
             .failure => |port_reason| {
-                std.debug.print("\n[{s}] {t}: the original decodes {d} bytes, the port fails with \"{s}\"\n", .{
+                std.debug.print("\n[{s}] {t}: the original decodes {d} bytes, " ++
+                    "the port fails with \"{s}\"\n", .{
                     label, call.function, bytes.len, port_reason orelse "(null)",
                 });
                 return error.TestUnexpectedResult;
@@ -117,16 +128,24 @@ fn expectSame(input: []const u8, call: Call, label: []const u8) !void {
         },
         .failure => |their_reason| switch (ours) {
             .bytes => |port_bytes| {
-                std.debug.print("\n[{s}] {t}: the original fails with \"{s}\", the port decodes {d} bytes\n", .{
+                std.debug.print("\n[{s}] {t}: the original fails with \"{s}\", " ++
+                    "the port decodes {d} bytes\n", .{
                     label, call.function, their_reason orelse "(null)", port_bytes.len,
                 });
                 return error.TestUnexpectedResult;
             },
             .failure => |port_reason| {
-                const same = if (their_reason) |r| (port_reason != null and std.mem.eql(u8, r, port_reason.?)) else port_reason == null;
+                const same = if (their_reason) |r|
+                    port_reason != null and std.mem.eql(u8, r, port_reason.?)
+                else
+                    port_reason == null;
                 if (!same) {
-                    std.debug.print("\n[{s}] {t}: the original fails with \"{s}\", the port with \"{s}\"\n", .{
-                        label, call.function, their_reason orelse "(null)", port_reason orelse "(null)",
+                    std.debug.print("\n[{s}] {t}: the original fails with \"{s}\", " ++
+                        "the port with \"{s}\"\n", .{
+                        label,
+                        call.function,
+                        their_reason orelse "(null)",
+                        port_reason orelse "(null)",
                     });
                     return error.TestUnexpectedResult;
                 }
@@ -149,17 +168,31 @@ fn span(reason: ?[*:0]const u8) ?[]const u8 {
 /// sizes, and fixed ones of the exact length, one short, half and empty.
 /// `expected_len` is the stream's output length, when it decodes.
 fn expectAllSame(input: []const u8, expected_len: usize, header: bool, label: []const u8) !void {
-    for ([_]Function{ .malloc, .malloc_guesssize, .malloc_guesssize_headerflag, .noheader_malloc }) |function| {
-        for ([_]u32{ 1, 2, 7, 100, 16384 }) |initial_size| {
-            try expectSame(input, .{ .function = function, .initial_size = initial_size, .parse_header = header }, label);
-        }
-        if (expected_len > 0) {
-            const exact: u32 = @intCast(expected_len);
-            try expectSame(input, .{ .function = function, .initial_size = exact, .parse_header = header }, label);
+    const growing = [_]Function{
+        .malloc,
+        .malloc_guesssize,
+        .malloc_guesssize_headerflag,
+        .noheader_malloc,
+    };
+    const exact: u32 = @intCast(expected_len);
+    for (growing) |function| {
+        for ([_]u32{ 1, 2, 7, 100, 16384, exact }) |initial_size| {
+            if (initial_size == 0) continue;
+            try expectSame(input, .{
+                .function = function,
+                .initial_size = initial_size,
+                .parse_header = header,
+            }, label);
         }
     }
     for ([_]Function{ .buffer, .noheader_buffer }) |function| {
-        const lengths = [_]usize{ expected_len, expected_len -| 1, expected_len / 2, 0, expected_len + 100 };
+        const lengths = [_]usize{
+            expected_len,
+            expected_len -| 1,
+            expected_len / 2,
+            0,
+            expected_len + 100,
+        };
         for (lengths) |buffer_len| {
             try expectSame(input, .{ .function = function, .buffer_len = buffer_len }, label);
         }
@@ -188,7 +221,7 @@ fn samples(arena: std.mem.Allocator) ![]const []const u8 {
     var prng: std.Random.DefaultPrng = .init(0x2a71b);
     const rng = prng.random();
     var list: std.ArrayList([]const u8) = .empty;
-    try list.appendSlice(arena, &.{ "", "a", "abc", "hello hello hello hello, said the zlib stream" });
+    try list.appendSlice(arena, &.{ "", "a", "abc", "hello hello hello hello, said the stream" });
 
     const random = try arena.alloc(u8, 1000);
     rng.bytes(random);
@@ -268,7 +301,9 @@ test "zlib: every block type and block size decodes as in the original, through 
     for (try samples(arena), 0..) |data, i| {
         for ([_]bool{ true, false }) |header| {
             for (try encodings(arena, data, header), 0..) |encoded, k| {
-                const label = try std.fmt.allocPrint(arena, "sample {d} encoding {d} header {}", .{ i, k, header });
+                const label = try std.fmt.allocPrint(arena, "sample {d} encoding {d} header {}", .{
+                    i, k, header,
+                });
                 try expectAllSame(encoded, data.len, header, label);
             }
         }
@@ -276,7 +311,11 @@ test "zlib: every block type and block size decodes as in the original, through 
 }
 
 /// A stream from `bits`: header, then hand-written blocks.
-fn handMade(arena: std.mem.Allocator, header: bool, comptime write: fn (*deflate.BitWriter) anyerror!void) ![]u8 {
+fn handMade(
+    arena: std.mem.Allocator,
+    header: bool,
+    comptime write: fn (*deflate.BitWriter) anyerror!void,
+) ![]u8 {
     var w: deflate.BitWriter = .init(arena);
     if (header) {
         try w.byte(0x78);
@@ -529,7 +568,7 @@ test "zlib: corrupt, truncated and odd streams fail or decode as in the original
 
     // Headers: too short, a bad check, a preset dictionary, not DEFLATE.
     const headers = [_][]const u8{
-        "",               "\x78",           "\x78\x9c",       "\x78\x9d\x03\x00",
+        "",                 "\x78",             "\x78\x9c",         "\x78\x9d\x03\x00",
         "\x78\xbb\x03\x00", "\x79\x18\x03\x00", "\x77\x9c\x03\x00", "\x08\x1d\x03\x00",
         "\x78\x01\x03\x00",
     };
@@ -539,13 +578,13 @@ test "zlib: corrupt, truncated and odd streams fail or decode as in the original
     }
 
     const writers = .{
-        cases.typeThree,        cases.storedBadNlen,      cases.storedPastEnd,
-        cases.fixedThenStored,  cases.emptyStored,        cases.distanceTooFar,
-        cases.lengthCode286,    cases.lengthCode287,      cases.distanceCode30,
-        cases.distanceCode31,   cases.everyLength,        cases.noEndOfBlock,
-        cases.endPastInput,     cases.badSizes,           cases.badCodeLengths,
-        cases.repeatFirst,      cases.repeatPastEnd,      cases.invalidCodeLengthCode,
-        cases.longCodes,        cases.longCodesValid,
+        cases.typeThree,       cases.storedBadNlen,  cases.storedPastEnd,
+        cases.fixedThenStored, cases.emptyStored,    cases.distanceTooFar,
+        cases.lengthCode286,   cases.lengthCode287,  cases.distanceCode30,
+        cases.distanceCode31,  cases.everyLength,    cases.noEndOfBlock,
+        cases.endPastInput,    cases.badSizes,       cases.badCodeLengths,
+        cases.repeatFirst,     cases.repeatPastEnd,  cases.invalidCodeLengthCode,
+        cases.longCodes,       cases.longCodesValid,
     };
     inline for (writers, 0..) |write, i| {
         for ([_]bool{ true, false }) |header| {
@@ -608,7 +647,8 @@ test "zlib: zero bits past the end repeat a match until the buffer is full, as i
         for (0..4) |zero_bytes| {
             const input = try endlessMatch(arena, literals, zero_bytes);
             for ([_]usize{ 20000, 20023, 100_000, 1 << 20 }) |buffer_len| {
-                try expectSame(input, .{ .function = .buffer, .buffer_len = buffer_len }, "endless match");
+                const call: Call = .{ .function = .buffer, .buffer_len = buffer_len };
+                try expectSame(input, call, "endless match");
             }
             const buffer = try arena.alloc(u8, 1 << 20);
             if (zlib.decodeBuffer(buffer, input, .{})) |_| {} else |err| {
@@ -626,15 +666,19 @@ test "zlib: initial sizes of 0 and 1 grow as in the original" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     for (try encodings(arena, "", true)) |encoded| {
-        try expectSame(encoded, .{ .function = .malloc_guesssize, .initial_size = 0 }, "empty, size 0");
-        try expectSame(encoded, .{ .function = .malloc_guesssize, .initial_size = 1 }, "empty, size 1");
+        for ([_]u32{ 0, 1 }) |initial_size| {
+            const call: Call = .{ .function = .malloc_guesssize, .initial_size = initial_size };
+            try expectSame(encoded, call, "empty");
+        }
     }
     const xs = try arena.alloc(u8, 5000);
     @memset(xs, 'x');
     for (try encodings(arena, xs, true)) |encoded| {
-        try expectSame(encoded, .{ .function = .malloc_guesssize, .initial_size = 1 }, "5000 bytes, size 1");
+        const call: Call = .{ .function = .malloc_guesssize, .initial_size = 1 };
+        try expectSame(encoded, call, "5000 bytes, size 1");
         // The original would loop for ever here; the port fails.
-        try std.testing.expectError(error.OutOfMemory, zlib.decodeAlloc(gpa, encoded, .{ .initial_size = 0 }));
+        const result = zlib.decodeAlloc(gpa, encoded, .{ .initial_size = 0 });
+        try std.testing.expectError(error.OutOfMemory, result);
     }
 }
 

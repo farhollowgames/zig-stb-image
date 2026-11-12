@@ -149,7 +149,10 @@ pub fn random(gpa: std.mem.Allocator, rng: std.Random, image: Image, options: Op
     }
     if (options.trns) |trns| try chunks.append(arena, .{ .kind = "tRNS", .data = trns });
     const raw = try rawData(arena, rng, image, options.filter_offset, options.filter);
-    const compressed = try deflate.compress(arena, raw, .{ .zlib = !options.cgbi, .kind = options.kind });
+    const compressed = try deflate.compress(arena, raw, .{
+        .zlib = !options.cgbi,
+        .kind = options.kind,
+    });
     try chunks.append(arena, .{ .kind = "IDAT", .data = compressed });
     try chunks.append(arena, .{ .kind = "IEND" });
     return file(gpa, chunks.items);
