@@ -14,4 +14,8 @@ test {
     _ = @import("hdr_test.zig");
     _ = @import("gif_test.zig");
     _ = @import("pic_test.zig");
+    _ = @import("bmp_test.zig");
+    _ = @import("tga_test.zig");
+    _ = @import("psd_test.zig");
+    _ = @import("pnm_test.zig");
 }
