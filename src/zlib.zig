@@ -54,7 +54,7 @@ pub fn decodeAlloc(gpa: std.mem.Allocator, input: []const u8, options: AllocOpti
 /// before it, as in the original.
 pub fn decodeBuffer(output: []u8, input: []const u8, options: BufferOptions) Error!usize {
     var decoder: Decoder = .{
-        .input = input,
+        .bits = .{ .input = input },
         .gpa = null,
         .out = output,
         .limit = output.len,
@@ -84,7 +84,7 @@ pub fn decodeGrowing(
     // the decode fails stays the original's, decided by `limit`.
     const likely = (input.len +| 8) *| 1032;
     var decoder: Decoder = .{
-        .input = input,
+        .bits = .{ .input = input },
         .gpa = gpa,
         .out = try gpa.alloc(u8, @min(options.initial_size, likely)),
         .limit = options.initial_size,
@@ -205,8 +205,10 @@ const distance_extra = [32]u5{
     7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 0, 0,
 };
 
-/// `stbi__zbuf`: the input, the bit buffer and the output.
-const Decoder = struct {
+/// The input and the bit buffer read from it. The hot loop of a Huffman
+/// block keeps a copy of it in a local, which stores to the output cannot
+/// alias, so it stays in registers.
+const Bits = struct {
     input: []const u8,
     pos: usize = 0,
     /// The bits in `code_buffer`, from 0 to 32; `code_buffer` is always
@@ -215,6 +217,115 @@ const Decoder = struct {
     /// The decoder ran out of input once and went on with 16 zero bits.
     hit_zeof_once: bool = false,
     code_buffer: u32 = 0,
+
+    fn atEof(bits: *const Bits) bool {
+        return bits.pos >= bits.input.len;
+    }
+
+    fn get8(bits: *Bits) u8 {
+        if (bits.atEof()) return 0;
+        const byte = bits.input[bits.pos];
+        bits.pos += 1;
+        return byte;
+    }
+
+    /// Reads whole bytes until more than 24 bits are buffered. Callers fill
+    /// only below 16 bits.
+    inline fn fill(bits: *Bits) void {
+        if (bits.input.len - bits.pos < 4) {
+            bits.* = fillBytes(bits.*);
+            return;
+        }
+        // The loop of `fillBytes` with four bytes of input left, at once:
+        // it reads `(32 - num_bits) / 8` bytes, the ones that fit.
+        const n: u5 = @intCast(bits.num_bits);
+        if (bits.code_buffer >= (@as(u32, 1) << n)) {
+            bits.pos = bits.input.len;
+            return;
+        }
+        const count: u6 = (32 - @as(u6, n)) >> 3;
+        const word = std.mem.readInt(u32, bits.input[bits.pos..][0..4], .little);
+        const mask: u32 = @truncate((@as(u64, 1) << (count * 8)) - 1);
+        bits.code_buffer |= (word & mask) << n;
+        bits.num_bits += @as(i32, count) * 8;
+        bits.pos += count;
+    }
+
+    fn fillBytes(start: Bits) Bits {
+        var bits = start;
+        while (true) {
+            // Bits above `num_bits` would mean a corrupt buffer: end the
+            // input, so the decode fails.
+            if (bits.code_buffer >= (@as(u32, 1) << @intCast(bits.num_bits))) {
+                bits.pos = bits.input.len;
+                return bits;
+            }
+            bits.code_buffer |= @as(u32, bits.get8()) << @intCast(bits.num_bits);
+            bits.num_bits += 8;
+            if (bits.num_bits > 24) return bits;
+        }
+    }
+
+    /// The next `n` bits. Past the end of the input they are zeros, without
+    /// end, unlike `decode`'s, which stop after 16; a corrupt stream can
+    /// so repeat a match until the output limit, as in the original.
+    inline fn receive(bits: *Bits, n: u5) u32 {
+        if (bits.num_bits < n) bits.fill();
+        const k = bits.code_buffer & ((@as(u32, 1) << n) - 1);
+        bits.code_buffer >>= n;
+        bits.num_bits -= n;
+        return k;
+    }
+
+    /// The next symbol of `z`, or -1 for an invalid code or an input that
+    /// ended. At the end of the input it goes on once with 16 zero bits;
+    /// the end of the block checks that none of them were used.
+    inline fn decode(bits: *Bits, z: *const Huffman) i32 {
+        if (bits.num_bits < 16) {
+            if (bits.atEof()) {
+                if (bits.hit_zeof_once) return -1;
+                bits.hit_zeof_once = true;
+                bits.num_bits += 16;
+            } else {
+                bits.fill();
+            }
+        }
+        const b = z.fast[bits.code_buffer & fast_mask];
+        if (b != 0) {
+            const s: u5 = @intCast(b >> 9);
+            bits.code_buffer >>= s;
+            bits.num_bits -= s;
+            return b & 511;
+        }
+        const slow = decodeSlow(bits.code_buffer, z);
+        if (slow.symbol >= 0) {
+            bits.code_buffer >>= slow.size;
+            bits.num_bits -= slow.size;
+        }
+        return slow.symbol;
+    }
+
+    const Code = struct { symbol: i32, size: u5 };
+
+    /// A code longer than `fast_bits`, found from its length's first code:
+    /// its symbol, or -1, and its length.
+    fn decodeSlow(code_buffer: u32, z: *const Huffman) Code {
+        const invalid: Code = .{ .symbol = -1, .size = 0 };
+        const k: i32 = @intCast(bitReverse(code_buffer, 16));
+        var s: usize = fast_bits + 1;
+        while (k >= z.maxcode[s]) s += 1;
+        if (s >= 16) return invalid;
+        const b = (k >> @intCast(16 - s)) - z.firstcode[s] + z.firstsymbol[s];
+        if (b < 0 or b >= symbol_count) return invalid;
+        const at: usize = @intCast(b);
+        if (z.size[at] != s) return invalid;
+        return .{ .symbol = z.value[at], .size = @intCast(s) };
+    }
+};
+
+/// `stbi__zbuf`: the input, the bit buffer and the output.
+const Decoder = struct {
+    bits: Bits,
 
     /// Grows the output; null for a fixed buffer.
     gpa: ?std.mem.Allocator,
@@ -229,80 +340,6 @@ const Decoder = struct {
     distance: *const Huffman = undefined,
     dynamic_length: Huffman = undefined,
     dynamic_distance: Huffman = undefined,
-
-    fn atEof(d: *const Decoder) bool {
-        return d.pos >= d.input.len;
-    }
-
-    fn get8(d: *Decoder) u8 {
-        if (d.atEof()) return 0;
-        const byte = d.input[d.pos];
-        d.pos += 1;
-        return byte;
-    }
-
-    fn fillBits(d: *Decoder) void {
-        while (true) {
-            // Bits above `num_bits` would mean a corrupt buffer: end the
-            // input, so the decode fails.
-            if (d.code_buffer >= (@as(u32, 1) << @intCast(d.num_bits))) {
-                d.pos = d.input.len;
-                return;
-            }
-            d.code_buffer |= @as(u32, d.get8()) << @intCast(d.num_bits);
-            d.num_bits += 8;
-            if (d.num_bits > 24) return;
-        }
-    }
-
-    /// The next `n` bits. Past the end of the input they are zeros, without
-    /// end, unlike `decode`'s, which stop after 16; a corrupt stream can
-    /// so repeat a match until the output limit, as in the original.
-    fn receive(d: *Decoder, n: u5) u32 {
-        if (d.num_bits < n) d.fillBits();
-        const k = d.code_buffer & ((@as(u32, 1) << n) - 1);
-        d.code_buffer >>= n;
-        d.num_bits -= n;
-        return k;
-    }
-
-    /// The next symbol of `z`, or -1 for an invalid code or an input that
-    /// ended. At the end of the input it goes on once with 16 zero bits;
-    /// the end of the block checks that none of them were used.
-    fn decode(d: *Decoder, z: *const Huffman) i32 {
-        if (d.num_bits < 16) {
-            if (d.atEof()) {
-                if (d.hit_zeof_once) return -1;
-                d.hit_zeof_once = true;
-                d.num_bits += 16;
-            } else {
-                d.fillBits();
-            }
-        }
-        const b = z.fast[d.code_buffer & fast_mask];
-        if (b != 0) {
-            const s: u5 = @intCast(b >> 9);
-            d.code_buffer >>= s;
-            d.num_bits -= s;
-            return b & 511;
-        }
-        return d.decodeSlow(z);
-    }
-
-    /// A code longer than `fast_bits`, found from its length's first code.
-    fn decodeSlow(d: *Decoder, z: *const Huffman) i32 {
-        const k: i32 = @intCast(bitReverse(d.code_buffer, 16));
-        var s: usize = fast_bits + 1;
-        while (k >= z.maxcode[s]) s += 1;
-        if (s >= 16) return -1;
-        const b = (k >> @intCast(16 - s)) - z.firstcode[s] + z.firstsymbol[s];
-        if (b < 0 or b >= symbol_count) return -1;
-        const at: usize = @intCast(b);
-        if (z.size[at] != s) return -1;
-        d.code_buffer >>= @intCast(s);
-        d.num_bits -= @intCast(s);
-        return z.value[at];
-    }
 
     /// Makes room for `n` bytes after the first `cur` (`stbi__zexpand`).
     fn expand(d: *Decoder, cur: usize, n: usize) Error!void {
@@ -326,16 +363,22 @@ const Decoder = struct {
 
     /// `stbi__parse_huffman_block`: symbols up to the end of the block.
     fn parseHuffmanBlock(d: *Decoder) Error!void {
+        var bits = d.bits;
+        defer d.bits = bits;
+        const length = d.length;
+        const distance = d.distance;
+        var out = d.out;
         var zout = d.len;
         while (true) {
-            var z = d.decode(d.length);
+            var z = bits.decode(length);
             if (z < 256) {
                 if (z < 0) return error.ZlibBadHuffmanCode;
-                if (zout >= d.out.len) {
+                if (zout >= out.len) {
                     try d.expand(zout, 1);
+                    out = d.out;
                     zout = d.len;
                 }
-                d.out[zout] = @intCast(z);
+                out[zout] = @intCast(z);
                 zout += 1;
                 continue;
             }
@@ -343,28 +386,28 @@ const Decoder = struct {
                 d.len = zout;
                 // Using any of the 16 zero bits added at the end of the
                 // input means the stream ended early.
-                if (d.hit_zeof_once and d.num_bits < 16) return error.UnexpectedPngEnd;
+                if (bits.hit_zeof_once and bits.num_bits < 16) return error.UnexpectedPngEnd;
                 return;
             }
             // Length codes 286 and 287 never appear in valid data.
             if (z >= 286) return error.ZlibBadHuffmanCode;
             const length_code: usize = @intCast(z - 257);
             var len: usize = length_base[length_code];
-            if (length_extra[length_code] != 0) len += d.receive(length_extra[length_code]);
-            z = d.decode(d.distance);
+            if (length_extra[length_code] != 0) len += bits.receive(length_extra[length_code]);
+            z = bits.decode(distance);
             // Distance codes 30 and 31 never appear in valid data.
             if (z < 0 or z >= 30) return error.ZlibBadHuffmanCode;
             const distance_code: usize = @intCast(z);
             var dist: usize = distance_base[distance_code];
             if (distance_extra[distance_code] != 0) {
-                dist += d.receive(distance_extra[distance_code]);
+                dist += bits.receive(distance_extra[distance_code]);
             }
             if (zout < dist) return error.BadDistance;
-            if (len > d.out.len - zout) {
+            if (len > out.len - zout) {
                 try d.expand(zout, len);
+                out = d.out;
                 zout = d.len;
             }
-            const out = d.out;
             if (dist == 1) {
                 @memset(out[zout..][0..len], out[zout - 1]);
             } else {
@@ -385,19 +428,19 @@ const Decoder = struct {
         var lencodes: [286 + 32 + 137]u8 = undefined;
         var codelength_sizes: [19]u8 = @splat(0);
 
-        const hlit: usize = d.receive(5) + 257;
-        const hdist: usize = d.receive(5) + 1;
-        const hclen: usize = d.receive(4) + 4;
+        const hlit: usize = d.bits.receive(5) + 257;
+        const hdist: usize = d.bits.receive(5) + 1;
+        const hclen: usize = d.bits.receive(4) + 4;
         const ntot = hlit + hdist;
 
         for (length_dezigzag[0..hclen]) |symbol| {
-            codelength_sizes[symbol] = @intCast(d.receive(3));
+            codelength_sizes[symbol] = @intCast(d.bits.receive(3));
         }
         try z_codelength.build(&codelength_sizes);
 
         var n: usize = 0;
         while (n < ntot) {
-            const c = d.decode(&z_codelength);
+            const c = d.bits.decode(&z_codelength);
             if (c < 0 or c >= 19) return error.ZlibBadCodeLengths;
             if (c < 16) {
                 lencodes[n] = @intCast(c);
@@ -407,13 +450,13 @@ const Decoder = struct {
             var fill: u8 = 0;
             var count: usize = undefined;
             if (c == 16) {
-                count = d.receive(2) + 3;
+                count = d.bits.receive(2) + 3;
                 if (n == 0) return error.ZlibBadCodeLengths;
                 fill = lencodes[n - 1];
             } else if (c == 17) {
-                count = d.receive(3) + 3;
+                count = d.bits.receive(3) + 3;
             } else {
-                count = d.receive(7) + 11;
+                count = d.bits.receive(7) + 11;
             }
             if (ntot - n < count) return error.ZlibBadCodeLengths;
             @memset(lencodes[n..][0..count], fill);
@@ -428,34 +471,34 @@ const Decoder = struct {
     /// `stbi__parse_uncompressed_block`: a stored block.
     fn parseUncompressedBlock(d: *Decoder) Error!void {
         var header: [4]u8 = undefined;
-        if (d.num_bits & 7 != 0) _ = d.receive(@intCast(d.num_bits & 7));
+        if (d.bits.num_bits & 7 != 0) _ = d.bits.receive(@intCast(d.bits.num_bits & 7));
         // The whole bytes still in the bit buffer come first, then bytes
         // from the input.
         var k: usize = 0;
-        while (d.num_bits > 0) {
-            header[k] = @truncate(d.code_buffer);
+        while (d.bits.num_bits > 0) {
+            header[k] = @truncate(d.bits.code_buffer);
             k += 1;
-            d.code_buffer >>= 8;
-            d.num_bits -= 8;
+            d.bits.code_buffer >>= 8;
+            d.bits.num_bits -= 8;
         }
-        if (d.num_bits < 0) return error.ZlibCorrupt;
-        while (k < 4) : (k += 1) header[k] = d.get8();
+        if (d.bits.num_bits < 0) return error.ZlibCorrupt;
+        while (k < 4) : (k += 1) header[k] = d.bits.get8();
         const len = @as(usize, header[1]) * 256 + header[0];
         const nlen = @as(usize, header[3]) * 256 + header[2];
         if (nlen != len ^ 0xffff) return error.ZlibCorrupt;
-        if (len > d.input.len - d.pos) return error.ZlibReadPastBuffer;
+        if (len > d.bits.input.len - d.bits.pos) return error.ZlibReadPastBuffer;
         if (len > d.out.len - d.len) try d.expand(d.len, len);
-        @memcpy(d.out[d.len..][0..len], d.input[d.pos..][0..len]);
-        d.pos += len;
+        @memcpy(d.out[d.len..][0..len], d.bits.input[d.bits.pos..][0..len]);
+        d.bits.pos += len;
         d.len += len;
     }
 
     /// `stbi__parse_zlib_header`.
     fn parseZlibHeader(d: *Decoder) Error!void {
-        const cmf: u32 = d.get8();
+        const cmf: u32 = d.bits.get8();
         const cm = cmf & 15;
-        const flg: u32 = d.get8();
-        if (d.atEof()) return error.BadZlibHeader;
+        const flg: u32 = d.bits.get8();
+        if (d.bits.atEof()) return error.BadZlibHeader;
         if ((cmf * 256 + flg) % 31 != 0) return error.BadZlibHeader;
         if (flg & 32 != 0) return error.ZlibPresetDictionary;
         if (cm != 8) return error.ZlibBadCompression;
@@ -464,12 +507,12 @@ const Decoder = struct {
     /// `stbi__parse_zlib`: the header, then blocks up to the final one.
     fn parseZlib(d: *Decoder, parse_header: bool) Error!void {
         if (parse_header) try d.parseZlibHeader();
-        d.num_bits = 0;
-        d.code_buffer = 0;
-        d.hit_zeof_once = false;
+        d.bits.num_bits = 0;
+        d.bits.code_buffer = 0;
+        d.bits.hit_zeof_once = false;
         while (true) {
-            const final = d.receive(1);
-            switch (d.receive(2)) {
+            const final = d.bits.receive(1);
+            switch (d.bits.receive(2)) {
                 0 => try d.parseUncompressedBlock(),
                 1 => {
                     d.length = &fixed.length;
