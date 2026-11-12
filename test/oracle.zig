@@ -9,7 +9,20 @@ const stbi = @import("stb_image");
 const fuzz_options = @import("fuzz_options");
 
 pub const Bits = enum { u8, u16, f32 };
-pub const Via = enum(c_int) { memory = 0, callbacks = 1, file = 2 };
+pub const Via = enum(c_int) {
+    memory = 0,
+    callbacks = 1,
+    /// From a file at an offset, through a positional `std.Io.File.Reader`.
+    file = 2,
+    /// From a file the port opens by `dir` and name and the original by its
+    /// path (`stbi_load`, `stbi_info` and so on).
+    path = 3,
+    /// From a file at an offset through a reader that cannot seek
+    /// (`readerStreaming`), against the original on the same file. The
+    /// results are compared, not where the file is left: the port cannot
+    /// seek back there, and leaves the reader where its reads reached.
+    file_streaming = 4,
+};
 pub const Path = enum { simd, scalar };
 
 pub const Settings = extern struct {
@@ -26,6 +39,7 @@ pub const Settings = extern struct {
     l2h_scale: f32 = 1.0,
     h2l_gamma: f32 = 2.2,
     h2l_scale: f32 = 1.0,
+    path: ?[*:0]const u8 = null,
 };
 
 pub const Result = extern struct {
@@ -93,7 +107,7 @@ fn queryFn(path: Path) *const fn ([*]const u8, usize, c_int, *const Settings, *R
 pub const Request = struct {
     bits: Bits = .u8,
     via: Via = .memory,
-    /// For `.file`: junk bytes before the image, so the load starts at an
+    /// For `.file` and `.file_streaming`: junk bytes before the image, so the load starts at an
     /// offset into the file.
     file_offset: u32 = 0,
     options: stbi.Options = .{},
@@ -101,7 +115,7 @@ pub const Request = struct {
     pub fn settings(request: Request) Settings {
         const o = request.options;
         return .{
-            .via = @backingInt(request.via),
+            .via = @backingInt(if (request.via == .file_streaming) Via.file else request.via),
             .req_comp = o.reqComp(),
             .flip = @intFromBool(o.flip_vertically),
             .unpremultiply = @intFromBool(o.unpremultiply),
@@ -170,6 +184,53 @@ const MemFile = struct {
     }
 };
 
+/// An input in a file of its own in a temporary directory, for the loads
+/// and queries by path: the original opens it by `path`, the port by `dir`
+/// and `name`.
+const TmpFile = struct {
+    tmp: std.testing.TmpDir,
+    path_buffer: [128]u8,
+    path_len: usize,
+
+    const name = "image";
+
+    fn init(bytes: []const u8) !TmpFile {
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+        var file: TmpFile = .{ .tmp = tmp, .path_buffer = undefined, .path_len = 0 };
+        // `tmpDir` makes its directories below the working directory.
+        const written = try std.mem.printSentinel(&file.path_buffer, ".zig-cache/tmp/{s}/" ++ name, .{
+            &tmp.sub_path,
+        }, 0);
+        file.path_len = written.len;
+        return file;
+    }
+
+    fn path(file: *const TmpFile) [*:0]const u8 {
+        return file.path_buffer[0..file.path_len :0];
+    }
+
+    fn deinit(file: *TmpFile) void {
+        file.tmp.cleanup();
+    }
+};
+
+/// The files an input is read from, when the request reads one.
+const Files = struct {
+    mem: ?MemFile = null,
+    tmp: ?*const TmpFile = null,
+
+    /// Points `settings` at the input's file, the descriptor at `offset`.
+    fn apply(files: Files, settings: *Settings, offset: u32) void {
+        if (files.mem) |m| {
+            m.seek(offset);
+            settings.fd = m.fd;
+        }
+        if (files.tmp) |t| settings.path = t.path();
+    }
+};
+
 fn sampleSize(bits: Bits) usize {
     return switch (bits) {
         .u8 => 1,
@@ -218,7 +279,7 @@ fn portLoad(
     gpa: std.mem.Allocator,
     bytes: []const u8,
     request: Request,
-    mem_file: ?MemFile,
+    files: Files,
     pos_after: *u64,
 ) !union(enum) { image: struct { owned: []u8, x: u32, y: u32, comp: u32 }, failure: anyerror } {
     switch (request.bits) {
@@ -234,14 +295,27 @@ fn portLoad(
                     var reader: std.Io.Reader = .fixed(bytes);
                     break :blk stbi.loadFromReader(T, gpa, &reader, request.options);
                 },
-                .file => blk: {
+                .file, .file_streaming => blk: {
                     var buffer: [512]u8 = undefined;
-                    var file_reader = mem_file.?.file().reader(std.testing.io, &buffer);
+                    const file = files.mem.?.file();
+                    var file_reader = if (request.via == .file)
+                        file.reader(std.testing.io, &buffer)
+                    else
+                        file.readerStreaming(std.testing.io, &buffer);
+                    files.mem.?.seek(0);
                     file_reader.seekTo(request.file_offset) catch unreachable;
                     const r = stbi.loadFromFile(T, gpa, &file_reader, request.options);
                     pos_after.* = file_reader.logicalPos();
                     break :blk r;
                 },
+                .path => stbi.loadFromPath(
+                    T,
+                    gpa,
+                    std.testing.io,
+                    files.tmp.?.tmp.dir,
+                    TmpFile.name,
+                    request.options,
+                ),
             };
             const image = result catch |err| return .{ .failure = err };
             return .{ .image = .{
@@ -281,22 +355,19 @@ fn setMallocFill(path: Path, fill: c_int) void {
 /// failure reason or file position when every allocation is filled with
 /// 0x00 than when it is filled with 0xff or 0x5a. (Two fills alone can
 /// agree by chance: 0x00 and 0xff both make a CMYK pixel black.)
-fn readsUnwritten(bytes: []const u8, request: Request, mem_file: ?MemFile) bool {
+fn readsUnwritten(bytes: []const u8, request: Request, files: Files) bool {
     for ([_]c_int{ 0xff, 0x5a }) |other| {
-        if (fillsDiffer(bytes, request, mem_file, .{ 0x00, other })) return true;
+        if (fillsDiffer(bytes, request, files, .{ 0x00, other })) return true;
     }
     return false;
 }
 
-fn fillsDiffer(bytes: []const u8, request: Request, mem_file: ?MemFile, fills: [2]c_int) bool {
+fn fillsDiffer(bytes: []const u8, request: Request, files: Files, fills: [2]c_int) bool {
     var settings = request.settings();
     for ([_]Path{ .simd, .scalar }) |path| {
         var results: [2]Result = undefined;
         for (&results, fills) |*result, fill| {
-            if (mem_file) |m| {
-                m.seek(request.file_offset);
-                settings.fd = m.fd;
-            }
+            files.apply(&settings, request.file_offset);
             setMallocFill(path, fill);
             loadFn(path)(bytes.ptr, bytes.len, bitsArg(request.bits), &settings, result);
             setMallocFill(path, -1);
@@ -335,7 +406,7 @@ const followed_path: Path = switch (stbi.jpeg_idct) {
 /// Whether the two builds of the original give different results for
 /// `bytes` loaded from memory as `request` says.
 pub fn originalBuildsDisagree(bytes: []const u8, request: Request) bool {
-    std.debug.assert(request.via != .file);
+    std.debug.assert(request.via == .memory or request.via == .callbacks);
     const paths = [_]Path{ .simd, .scalar };
     var results: [2]Result = undefined;
     const settings = request.settings();
@@ -374,11 +445,20 @@ pub fn expectLoadSame(
     expect: Expect,
 ) !void {
     if (fuzz_options.sanitize) return sanitizeCall(bytes, request, label, "load", .load);
-    const mem_file: ?MemFile = if (request.via == .file) try MemFile.init(bytes, request.file_offset) else null;
-    defer if (mem_file) |m| m.deinit();
+    var files: Files = .{};
+    if (request.via == .file or request.via == .file_streaming) {
+        files.mem = try MemFile.init(bytes, request.file_offset);
+    }
+    defer if (files.mem) |m| m.deinit();
+    var tmp_file: TmpFile = undefined;
+    if (request.via == .path) {
+        tmp_file = try TmpFile.init(bytes);
+        files.tmp = &tmp_file;
+    }
+    defer if (files.tmp != null) tmp_file.deinit();
 
     var port_pos: u64 = 0;
-    const port = try portLoad(gpa, bytes, request, mem_file, &port_pos);
+    const port = try portLoad(gpa, bytes, request, files, &port_pos);
     defer switch (port) {
         .image => |image| freePort(gpa, request.bits, image.owned),
         .failure => {},
@@ -387,7 +467,7 @@ pub fn expectLoadSame(
     const refuse = switch (expect) {
         .same, .same_size => false,
         .port_refuses => true,
-        .same_unless_unwritten => readsUnwritten(bytes, request, mem_file),
+        .same_unless_unwritten => readsUnwritten(bytes, request, files),
     };
     if (refuse) {
         if (port == .image) {
@@ -405,10 +485,7 @@ pub fn expectLoadSame(
     var results: [2]Result = undefined;
     var settings = request.settings();
     for (paths, &results) |path, *theirs| {
-        if (mem_file) |m| {
-            m.seek(request.file_offset);
-            settings.fd = m.fd;
-        }
+        files.apply(&settings, request.file_offset);
         loadFn(path)(bytes.ptr, bytes.len, bitsArg(request.bits), &settings, theirs);
     }
     defer for (paths, results) |path, theirs| freeFn(path)(theirs.pixels);
@@ -468,7 +545,7 @@ pub fn expectLoadSame(
                 }
             },
         }
-        if (mem_file != null and theirs.pos_after != port_pos) {
+        if (request.via == .file and theirs.pos_after != port_pos) {
             label.print(request, "{t}: the file is left at {d}, by the port at {d}", .{
                 path, theirs.pos_after, port_pos,
             });
@@ -496,26 +573,40 @@ pub fn expectQuerySame(
 ) !void {
     const request: Request = .{ .via = via };
     if (fuzz_options.sanitize) return sanitizeCall(bytes, request, label, @tagName(query), .{ .query = query });
-    const mem_file: ?MemFile = if (via == .file) try MemFile.init(bytes, 0) else null;
-    defer if (mem_file) |m| m.deinit();
+    var files: Files = .{};
+    if (via == .file or via == .file_streaming) files.mem = try MemFile.init(bytes, 0);
+    defer if (files.mem) |m| m.deinit();
+    var tmp_file: TmpFile = undefined;
+    if (via == .path) {
+        tmp_file = try TmpFile.init(bytes);
+        files.tmp = &tmp_file;
+    }
+    defer if (files.tmp != null) tmp_file.deinit();
 
     var settings = request.settings();
-    if (mem_file) |m| {
-        m.seek(0);
-        settings.fd = m.fd;
-    }
+    files.apply(&settings, 0);
     var theirs: Result = undefined;
     const r = queryFn(.simd)(bytes.ptr, bytes.len, @backingInt(query), &settings, &theirs);
 
     var buffer: [512]u8 = undefined;
     var reader: std.Io.Reader = .fixed(bytes);
-    var file_reader: std.Io.File.Reader = if (mem_file) |m| m.file().reader(std.testing.io, &buffer) else undefined;
+    var file_reader: std.Io.File.Reader = undefined;
+    if (files.mem) |m| {
+        m.seek(0);
+        file_reader = if (via == .file)
+            m.file().reader(std.testing.io, &buffer)
+        else
+            m.file().readerStreaming(std.testing.io, &buffer);
+    }
+    const io = std.testing.io;
+    const dir: std.Io.Dir = if (files.tmp) |t| t.tmp.dir else undefined;
     switch (query) {
         .info => {
             const found: anyerror!stbi.Info = switch (via) {
                 .memory => stbi.infoFromMemory(bytes),
                 .callbacks => stbi.infoFromReader(&reader),
-                .file => stbi.infoFromFile(&file_reader),
+                .file, .file_streaming => stbi.infoFromFile(&file_reader),
+                .path => stbi.infoFromPath(io, dir, TmpFile.name),
             };
             if (found) |info| {
                 // The original's sizes are `int`s, which BMP and PSD fill
@@ -543,7 +634,14 @@ pub fn expectQuerySame(
             const found: anyerror!bool = switch (via) {
                 .memory => if (query == .is_hdr) stbi.isHdrFromMemory(bytes) else stbi.is16BitFromMemory(bytes),
                 .callbacks => if (query == .is_hdr) stbi.isHdrFromReader(&reader) else stbi.is16BitFromReader(&reader),
-                .file => if (query == .is_hdr) stbi.isHdrFromFile(&file_reader) else stbi.is16BitFromFile(&file_reader),
+                .file, .file_streaming => if (query == .is_hdr)
+                    stbi.isHdrFromFile(&file_reader)
+                else
+                    stbi.is16BitFromFile(&file_reader),
+                .path => if (query == .is_hdr)
+                    stbi.isHdrFromPath(io, dir, TmpFile.name)
+                else
+                    stbi.is16BitFromPath(io, dir, TmpFile.name),
             };
             const ours = try found;
             if (ours != (r != 0)) {
@@ -552,7 +650,7 @@ pub fn expectQuerySame(
             }
         },
     }
-    if (mem_file != null) {
+    if (via == .file) {
         if (file_reader.logicalPos() != theirs.pos_after) {
             label.print(request, "{t}: the file is left at {d}, by the port at {d}", .{
                 query, theirs.pos_after, file_reader.logicalPos(),
@@ -564,7 +662,8 @@ pub fn expectQuerySame(
 
 /// Every load and query a corpus file goes through: each bit depth and
 /// component count from memory, flipped and not, and a sample through the
-/// reader and from a file.
+/// reader, from a file and by path; and the 8-bit load from a file through
+/// a reader that cannot seek.
 pub fn expectAllSame(gpa: std.mem.Allocator, bytes: []const u8, label: Label) !void {
     return expectAll(gpa, bytes, label, .same);
 }
@@ -586,9 +685,12 @@ pub fn expectAll(gpa: std.mem.Allocator, bytes: []const u8, label: Label, expect
         try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .callbacks }, label, expect);
         const from_file: Request = .{ .bits = bits, .via = .file, .file_offset = 3 };
         try expectLoadSame(gpa, bytes, from_file, label, expect);
+        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .path }, label, expect);
     }
+    const streaming: Request = .{ .via = .file_streaming, .file_offset = 3 };
+    try expectLoadSame(gpa, bytes, streaming, label, expect);
     for ([_]Query{ .info, .is_16_bit, .is_hdr }) |query| {
-        for ([_]Via{ .memory, .callbacks, .file }) |via| try expectQuerySame(bytes, query, via, label);
+        for (std.enums.values(Via)) |via| try expectQuerySame(bytes, query, via, label);
     }
 }
 

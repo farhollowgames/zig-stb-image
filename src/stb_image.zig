@@ -130,42 +130,43 @@ pub fn loadFromReader(
     return loadSource(T, gpa, &source, &options);
 }
 
-pub const FileError = Error || std.Io.File.Reader.SeekError;
-
 /// Decodes the image at `file_reader`'s position (`stbi_load_from_file` and
 /// its 16-bit and float forms). After an 8 or 16-bit load the reader is
 /// left at the first byte after what the decoder read; after a float load,
-/// as with stb_image, wherever its buffer reached.
+/// as with stb_image, wherever its buffer reached. On a reader that cannot
+/// seek (a pipe, or one made by `readerStreaming`) those seeks fail, and
+/// the reader is left where its reads reached, as the original ignores a
+/// failed `fseek`.
 pub fn loadFromFile(
     comptime T: type,
     gpa: std.mem.Allocator,
     file_reader: *std.Io.File.Reader,
     options: Options,
-) FileError!Image(T) {
+) Error!Image(T) {
     comptime checkSample(T);
     var source: Source = undefined;
     source.initReader(&file_reader.interface);
-    var image = loadSource(T, gpa, &source, &options) catch |err| {
-        try seekPastEnd(file_reader, &source);
+    const image = loadSource(T, gpa, &source, &options) catch |err| {
+        seekPastEnd(file_reader, &source);
         return err;
     };
-    errdefer image.deinit(gpa);
-    try seekPastEnd(file_reader, &source);
+    seekPastEnd(file_reader, &source);
     if (T != f32) {
         // Give back what the source buffered but did not use.
-        try file_reader.seekBy(-@as(i64, @intCast(source.end - source.pos)));
+        file_reader.seekBy(-@as(i64, @intCast(source.end - source.pos))) catch {};
     }
     return image;
 }
 
 /// Where the decoder skipped past the end of the file, the original's
-/// `fseek` leaves the file there; so does the port.
-fn seekPastEnd(file_reader: *std.Io.File.Reader, source: *const Source) FileError!void {
+/// `fseek` leaves the file there; so does the port, where it can seek.
+fn seekPastEnd(file_reader: *std.Io.File.Reader, source: *const Source) void {
     if (source.skipped_past_end == 0) return;
-    try file_reader.seekBy(std.math.cast(i64, source.skipped_past_end) orelse std.math.maxInt(i64));
+    const offset = std.math.cast(i64, source.skipped_past_end) orelse std.math.maxInt(i64);
+    file_reader.seekBy(offset) catch {};
 }
 
-pub const PathError = FileError || std.Io.File.OpenError;
+pub const PathError = Error || std.Io.File.OpenError;
 
 /// Decodes the image in the file at `sub_path` (`stbi_load` and its 16-bit
 /// and float forms).
@@ -180,7 +181,7 @@ pub fn loadFromPath(
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
-    var file_reader = file.readerStreaming(io, &buffer);
+    var file_reader = file.reader(io, &buffer);
     return loadFromFile(T, gpa, &file_reader, options);
 }
 
@@ -401,15 +402,14 @@ pub fn infoFromReader(reader: *std.Io.Reader) InfoError!Info {
     return found;
 }
 
-/// `stbi_info_from_file`: the file reader is put back where it was.
-pub fn infoFromFile(
-    file_reader: *std.Io.File.Reader,
-) (InfoError || std.Io.File.Reader.SeekError)!Info {
+/// `stbi_info_from_file`: the file reader is put back where it was, where
+/// it can seek (see `loadFromFile`).
+pub fn infoFromFile(file_reader: *std.Io.File.Reader) InfoError!Info {
     const start = file_reader.logicalPos();
     var source: Source = undefined;
     source.initReader(&file_reader.interface);
     const found = infoMain(&source);
-    try file_reader.seekTo(start);
+    file_reader.seekTo(start) catch {};
     if (source.read_failed) return error.ReadFailed;
     return found;
 }
@@ -419,11 +419,11 @@ pub fn infoFromPath(
     io: std.Io,
     dir: std.Io.Dir,
     sub_path: []const u8,
-) (InfoError || std.Io.File.Reader.SeekError || std.Io.File.OpenError)!Info {
+) (InfoError || std.Io.File.OpenError)!Info {
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
-    var file_reader = file.readerStreaming(io, &buffer);
+    var file_reader = file.reader(io, &buffer);
     return infoFromFile(&file_reader);
 }
 
@@ -443,15 +443,14 @@ pub fn is16BitFromReader(reader: *std.Io.Reader) error{ReadFailed}!bool {
     return found;
 }
 
-/// `stbi_is_16_bit_from_file`: the file reader is put back where it was.
-pub fn is16BitFromFile(
-    file_reader: *std.Io.File.Reader,
-) (error{ReadFailed} || std.Io.File.Reader.SeekError)!bool {
+/// `stbi_is_16_bit_from_file`: the file reader is put back where it was,
+/// where it can seek (see `loadFromFile`).
+pub fn is16BitFromFile(file_reader: *std.Io.File.Reader) error{ReadFailed}!bool {
     const start = file_reader.logicalPos();
     var source: Source = undefined;
     source.initReader(&file_reader.interface);
     const found = is16Main(&source);
-    try file_reader.seekTo(start);
+    file_reader.seekTo(start) catch {};
     if (source.read_failed) return error.ReadFailed;
     return found;
 }
@@ -461,11 +460,11 @@ pub fn is16BitFromPath(
     io: std.Io,
     dir: std.Io.Dir,
     sub_path: []const u8,
-) (error{ReadFailed} || std.Io.File.Reader.SeekError || std.Io.File.OpenError)!bool {
+) (error{ReadFailed} || std.Io.File.OpenError)!bool {
     const file = try dir.openFile(io, sub_path, .{});
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
-    var file_reader = file.readerStreaming(io, &buffer);
+    var file_reader = file.reader(io, &buffer);
     return is16BitFromFile(&file_reader);
 }
 
@@ -485,15 +484,14 @@ pub fn isHdrFromReader(reader: *std.Io.Reader) error{ReadFailed}!bool {
     return found;
 }
 
-/// `stbi_is_hdr_from_file`: the file reader is put back where it was.
-pub fn isHdrFromFile(
-    file_reader: *std.Io.File.Reader,
-) (error{ReadFailed} || std.Io.File.Reader.SeekError)!bool {
+/// `stbi_is_hdr_from_file`: the file reader is put back where it was,
+/// where it can seek (see `loadFromFile`).
+pub fn isHdrFromFile(file_reader: *std.Io.File.Reader) error{ReadFailed}!bool {
     const start = file_reader.logicalPos();
     var source: Source = undefined;
     source.initReader(&file_reader.interface);
     const found = isHdrMain(&source);
-    try file_reader.seekTo(start);
+    file_reader.seekTo(start) catch {};
     if (source.read_failed) return error.ReadFailed;
     return found;
 }
@@ -503,7 +501,7 @@ pub fn isHdrFromPath(io: std.Io, dir: std.Io.Dir, sub_path: []const u8) bool {
     const file = dir.openFile(io, sub_path, .{}) catch return false;
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
-    var file_reader = file.readerStreaming(io, &buffer);
+    var file_reader = file.reader(io, &buffer);
     return isHdrFromFile(&file_reader) catch false;
 }
 

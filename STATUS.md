@@ -110,6 +110,36 @@ performance pass, the skeptic's review, the fixes) are not started.
   `port/bmp-tga-psd-pnm` and `port/gif-hdr-pic` (local only, worktrees under
   `~/Projects/zig-stb-image.wt/`), all merged into `main`.
 
+### Step 7: fixes
+
+On branch `fix/skeptic` (worktree `~/Projects/zig-stb-image.wt/fix`, from
+`review/perf-and-skeptic`): each confirmed skeptic finding, fixed with a
+test that fails before the fix where there was a bug. One commit each.
+
+1. **`*Path` functions and readers that cannot seek: done.** The path
+   functions read through a positional file reader; `loadFromFile` and the
+   file queries ignore a failed seek, as the original ignores a failed
+   `fseek`, so they no longer return a seek error. Tests: "files: …"
+   (`test/file_test.zig`, the skeptic's probes; they failed first), and
+   `oracle.expectAll` now also loads every file by path at each bit depth
+   (against `stbi_load`, `stbi_load_16`, `stbi_loadf`), from a file through
+   a reader that cannot seek (results compared, not the position), and
+   runs the three queries by path and on such a reader.
+2. **Untested claims:** not started.
+3. **`Limits.bytes_max` and memory:** not started.
+4. **Comparison holes:** not started.
+5. **Hidden invariants in fast paths:** not started.
+6. **Benchmark rows through a reader and a file:** not started.
+7. **PNM 16-bit:** not started.
+8. **Docs:** not started.
+
+- **Resume:** the next finding not done above; `stbi-build <worktree> test
+  -Dtest-filter=<name>` while working, the full run before each commit.
+- **Known difference, not fixed:** on a `FILE` that cannot seek (a pipe),
+  the original's skips (`fseek` forward) fail and skip nothing, so it reads
+  the skipped bytes as data; the port's reader skips them. The port gives
+  what the original gives on a seekable file.
+
 ### Performance: pixels (BMP, PSD, TGA, component conversion)
 
 On branch `perf/pixels` (worktree `~/Projects/zig-stb-image.wt/perf-pixels`).
@@ -200,12 +230,12 @@ The full test run passes (162 tests).
 | --- | --- | --- | --- |
 | `stbi_load_from_memory`, `stbi_load_16_from_memory`, `stbi_loadf_from_memory` | `loadFromMemory(u8 / u16 / f32, …)` | every corpus file and fuzz case | oracle-tested |
 | `stbi_load_from_callbacks`, `stbi_load_16_from_callbacks`, `stbi_loadf_from_callbacks`, `stbi_io_callbacks` | `loadFromReader` on a `*std.Io.Reader` | corpus files; fuzz cases | oracle-tested |
-| `stbi_load_from_file`, `stbi_load_from_file_16`, `stbi_loadf_from_file` | `loadFromFile` on a `*std.Io.File.Reader`, leaving it where the original leaves the `FILE` | corpus files; fuzz cases | oracle-tested |
-| `stbi_load`, `stbi_load_16`, `stbi_loadf` | `loadFromPath` | | ported |
+| `stbi_load_from_file`, `stbi_load_from_file_16`, `stbi_loadf_from_file` | `loadFromFile` on a `*std.Io.File.Reader`, leaving it where the original leaves the `FILE`; on a reader that cannot seek, where its reads reached | corpus files; fuzz cases; every corpus file through a reader that cannot seek; "files: loadFromFile and the file queries on a reader that cannot seek …" | oracle-tested |
+| `stbi_load`, `stbi_load_16`, `stbi_loadf` | `loadFromPath` | every corpus file at each bit depth, against the original's loads by path; "files: loadFromPath …" | oracle-tested |
 | `stbi_load_gif_from_memory` | `loadGifFromMemory` | `test/gif_test.zig` | oracle-tested |
-| `stbi_info_from_memory`, `stbi_info_from_callbacks`, `stbi_info_from_file`, `stbi_info` | `infoFromMemory`, `infoFromReader`, `infoFromFile`, `infoFromPath` | corpus files; fuzz cases | oracle-tested |
-| `stbi_is_16_bit_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_16_bit` | `is16BitFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | oracle-tested |
-| `stbi_is_hdr_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_hdr` | `isHdrFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | oracle-tested |
+| `stbi_info_from_memory`, `stbi_info_from_callbacks`, `stbi_info_from_file`, `stbi_info` | `infoFromMemory`, `infoFromReader`, `infoFromFile`, `infoFromPath` | corpus files from memory, a reader, a file, a reader that cannot seek and by path; fuzz cases; "files: infoFromPath …" | oracle-tested |
+| `stbi_is_16_bit_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_16_bit` | `is16BitFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above; "files: is16BitFromPath …" | oracle-tested |
+| `stbi_is_hdr_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_hdr` | `isHdrFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above; "files: isHdrFromPath …" | oracle-tested |
 | `desired_channels`, `*channels_in_file` | `Options.components`, `Image.channels` and `Image.channels_in_file` | every load compares all five | oracle-tested |
 | `stbi_set_flip_vertically_on_load`, `…_thread` | `Options.flip_vertically`; `settings.setFlipVerticallyOnLoad`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |
 | `stbi_set_unpremultiply_on_load`, `…_thread` | `Options.unpremultiply`; `settings.setUnpremultiplyOnLoad`, `…Thread` | "settings: a thread's own flag wins there …", "settings: a load with a thread's own settings …" | oracle-tested |

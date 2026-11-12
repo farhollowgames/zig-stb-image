@@ -44,7 +44,7 @@ static void *oracle_realloc(void *p, size_t old_size, size_t new_size)
 #define ORACLE_CAT(a, b) ORACLE_CAT2(a, b)
 #define F(name) ORACLE_CAT(ORACLE_PREFIX, name)
 
-enum { VIA_MEMORY = 0, VIA_CALLBACKS = 1, VIA_FILE = 2 };
+enum { VIA_MEMORY = 0, VIA_CALLBACKS = 1, VIA_FILE = 2, VIA_PATH = 3 };
 
 typedef struct {
    int via;
@@ -54,6 +54,7 @@ typedef struct {
    int unpremultiply, unpremultiply_thread;
    int iphone, iphone_thread;
    float l2h_gamma, l2h_scale, h2l_gamma, h2l_scale;
+   const char *path; /* VIA_PATH: the file to open by name */
 } oracle_settings;
 
 typedef struct {
@@ -142,6 +143,11 @@ void F(load)(const unsigned char *bytes, size_t len, int bits, const oracle_sett
       if (bits == 8) out->pixels = stbi_load_from_callbacks(&ms_callbacks, &ms, &out->x, &out->y, &out->comp, s->req_comp);
       if (bits == 16) out->pixels = stbi_load_16_from_callbacks(&ms_callbacks, &ms, &out->x, &out->y, &out->comp, s->req_comp);
       if (bits == 32) out->pixels = stbi_loadf_from_callbacks(&ms_callbacks, &ms, &out->x, &out->y, &out->comp, s->req_comp);
+   } else if (s->via == VIA_PATH) {
+      if (!s->path) { out->reason = "oracle: no path"; return; }
+      if (bits == 8) out->pixels = stbi_load(s->path, &out->x, &out->y, &out->comp, s->req_comp);
+      if (bits == 16) out->pixels = stbi_load_16(s->path, &out->x, &out->y, &out->comp, s->req_comp);
+      if (bits == 32) out->pixels = stbi_loadf(s->path, &out->x, &out->y, &out->comp, s->req_comp);
    } else {
       FILE *f = open_fd(s->fd);
       if (!f) { out->reason = "oracle: fdopen"; return; }
@@ -191,6 +197,11 @@ int F(query)(const unsigned char *bytes, size_t len, int what, const oracle_sett
       if (what == 0) r = stbi_info_from_callbacks(&ms_callbacks, &ms, &out->x, &out->y, &out->comp);
       if (what == 1) r = stbi_is_16_bit_from_callbacks(&ms_callbacks, &ms);
       if (what == 2) r = stbi_is_hdr_from_callbacks(&ms_callbacks, &ms);
+   } else if (s->via == VIA_PATH) {
+      if (!s->path) { out->reason = "oracle: no path"; return 0; }
+      if (what == 0) r = stbi_info(s->path, &out->x, &out->y, &out->comp);
+      if (what == 1) r = stbi_is_16_bit(s->path);
+      if (what == 2) r = stbi_is_hdr(s->path);
    } else {
       FILE *f = open_fd(s->fd);
       if (!f) { out->reason = "oracle: fdopen"; return 0; }
