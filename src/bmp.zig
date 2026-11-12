@@ -395,20 +395,31 @@ fn decodeBgrRow(
 ) void {
     const width = out.len / out_n;
     if (in_n == 3 and width > 0) all_a.* |= 255;
-    const bytes = source.takeBuffered(width * in_n) orelse {
-        // Bytes past the buffer: one at a time, through the reader or as
-        // zeros past the end.
-        for (0..width) |x| {
-            const pixel = out[x * out_n ..][0..out_n];
-            pixel[2] = source.get8();
-            pixel[1] = source.get8();
-            pixel[0] = source.get8();
-            const a: u8 = if (in_n == 4) source.get8() else 255;
-            all_a.* |= a;
-            if (out_n == 4) pixel[3] = a;
-        }
-        return;
-    };
+    if (source.takeBuffered(width * in_n)) |bytes| {
+        return convertBgr(in_n, out_n, bytes, out, all_a);
+    }
+    // A row past the buffer: a piece at a time, read through the reader,
+    // or as zeros past the end, as `get8` reads it.
+    const piece = 256;
+    var scratch: [piece * in_n]u8 = undefined;
+    var x: usize = 0;
+    while (x < width) : (x += piece) {
+        const n = @min(piece, width - x);
+        source.readBytes(scratch[0 .. n * in_n]);
+        convertBgr(in_n, out_n, scratch[0 .. n * in_n], out[x * out_n ..][0 .. n * out_n], all_a);
+    }
+}
+
+/// `bytes`, `in_n`-byte BGR or BGRA pixels, into `out` as `decodeBgrRow`
+/// gives them.
+fn convertBgr(
+    comptime in_n: usize,
+    comptime out_n: usize,
+    bytes: []const u8,
+    out: []u8,
+    all_a: *u32,
+) void {
+    const width = out.len / out_n;
     const opaque_alpha: @Vector(1, u8) = @splat(255);
     var alpha_bits: @Vector(lanes * in_n, u8) = @splat(0);
     var x: usize = 0;

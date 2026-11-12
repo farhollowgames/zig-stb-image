@@ -159,7 +159,15 @@ test that fails before the fix where there was a bug. One commit each.
    (every caller fails on it). Test: "a code the Huffman table does not
    have leaves the bit count in range" (`src/jpeg.zig`), which failed
    first.
-6. **Benchmark rows through a reader and a file:** not started.
+6. **Benchmark rows through a reader and a file: done.** Ten bench rows
+   (png rgb, jpeg 4:2:0, bmp 24-bit, psd raw, psd rle, each via reader and
+   via file). Through a 128-byte buffer BMP and PSD fell back to a byte at
+   a time; `Source.readBytes` now copies pieces from the buffer for BMP
+   24/32-bit rows, PSD RLE literal runs and PSD raw planes. Port / original
+   SSE2, via reader and via file, before and after: bmp 24-bit 1.24/1.18
+   to 0.15/0.25, psd raw 1.09/1.09 to 0.85/0.89, psd rle 1.21/1.15 to
+   0.83/0.84; png rgb 0.83 and jpeg 0.53 to 0.55 did not move. The oracle
+   tests already load every file both ways, so no new test.
 7. **PNM 16-bit:** not started.
 8. **Docs:** not started.
 

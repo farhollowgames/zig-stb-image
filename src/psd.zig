@@ -32,13 +32,13 @@ fn decodeRle(source: *Source, out: []u8, pixel_count: usize) bool {
             len += 1;
             if (len > left) return false;
             count += len;
-            if (source.takeBuffered(len)) |run| {
-                for (run) |byte| {
-                    out[p] = byte;
-                    p += 4;
-                }
-            } else for (0..len) |_| {
-                out[p] = source.get8();
+            var scratch: [128]u8 = undefined;
+            const run = source.takeBuffered(len) orelse blk: {
+                source.readBytes(scratch[0..len]);
+                break :blk scratch[0..len];
+            };
+            for (run) |byte| {
+                out[p] = byte;
                 p += 4;
             }
         } else {
@@ -179,10 +179,18 @@ fn decodeRaw8(source: *Source, layout: Layout, out: []u8) Error!void {
         if (channel >= layout.channel_count) {
             const value: u8 = if (channel == 3) 255 else 0;
             for (0..layout.pixel_count) |i| samples[i * 4] = value;
-        } else if (layout.bitdepth == 16) {
-            for (0..layout.pixel_count) |i| samples[i * 4] = @intCast(source.get16be() >> 8);
         } else {
-            for (0..layout.pixel_count) |i| samples[i * 4] = source.get8();
+            // A piece at a time, read as `get8` reads it; of a 16-bit
+            // sample, the top byte.
+            const size: usize = if (layout.bitdepth == 16) 2 else 1;
+            var scratch: [1024]u8 = undefined;
+            const piece = scratch.len / size;
+            var i: usize = 0;
+            while (i < layout.pixel_count) : (i += piece) {
+                const n = @min(piece, layout.pixel_count - i);
+                source.readBytes(scratch[0 .. n * size]);
+                for (0..n) |j| samples[(i + j) * 4] = scratch[j * size];
+            }
         }
     }
     if (layout.channel_count >= 4) try removeWhiteMatte(u8, source, out);

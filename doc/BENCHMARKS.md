@@ -103,9 +103,19 @@ median time over the original's, so below 1 is faster.
   (against the original without SIMD 0.33 to 0.66). Much of the lead on RGB output is the original's scalar conversion
   to three channels, which its SSE2 code leaves out; to RGBA, which the
   SSE2 code converts, the two are close.
-- **BMP and PSD.** The original's per-pixel loops compile to vector code at
-  -O3; the port's do not yet.
-- **PNG palette.** The palette expansion is scalar in the port.
+- **Memory, reader and file loads.** The rows above, and every row whose
+  name does not say otherwise, load from memory. The rows named "via
+  reader" load through a `std.Io.Reader` over the bytes, against the
+  original's callbacks over the same bytes; those named "via file" load
+  from an in-memory file, against the original's `FILE` on the same
+  descriptor (the original also opens and closes a `FILE` for each
+  decode, a few microseconds). Both sides then read through a 128-byte
+  buffer, so the port's fast paths that take a whole row from memory do
+  not apply; it copies rows and planes from that buffer in pieces, as
+  the original reads them byte by byte. A run on 12 November 2026, best of
+  3, gave, time port / original SSE2: png rgb 0.82 via reader, 0.83 via
+  file; jpeg 4:2:0 0.53 and 0.53; bmp 24-bit 0.15 and 0.25; psd raw 0.85
+  and 0.89; psd rle 0.83 and 0.84.
 - **Allocation.** The port's zlib output is shrunk to its length at the
   end (`realloc`), and PNG reads IDAT data in 1 MiB pieces; the original
   does neither.

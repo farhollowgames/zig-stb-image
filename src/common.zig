@@ -289,6 +289,27 @@ pub const Source = struct {
         return false;
     }
 
+    /// Fills `dest` as `dest.len` calls of `get8` would: from the buffer,
+    /// refilling it from the reader 128 bytes at a time, and zeros once the
+    /// input has ended. Copies, where `get8` takes a byte at a time.
+    pub fn readBytes(source: *Source, dest: []u8) void {
+        var done: usize = 0;
+        while (done < dest.len) {
+            // After a skip from memory, `pos` may be past `end`.
+            if (source.pos < source.end) {
+                const n = @min(source.end - source.pos, dest.len - done);
+                @memcpy(dest[done..][0..n], source.base[source.pos..][0..n]);
+                source.pos += n;
+                done += n;
+            } else if (source.read_from_callbacks) {
+                source.refill();
+            } else {
+                @memset(dest[done..], 0);
+                return;
+            }
+        }
+    }
+
     /// The next `len` bytes, when all of them are in the buffer, read as
     /// `len` calls of `get8` would read them; null otherwise, reading
     /// nothing. Lets a decoder work on whole rows where the input allows.
