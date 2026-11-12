@@ -90,9 +90,14 @@ performance pass, the skeptic's review, the fixes) are not started.
   on x86-64; `@Vector` YCbCr to RGB/RGBA with the YCCK blend; `@Vector`
   2x2 (hv_2) upsampling; the bit reader's refill takes up to four bytes at
   once; the baseline AC loop keeps the bit buffer in locals; the DC
-  overflow test multiplies instead of dividing. Tried and
+  overflow test multiplies instead of dividing; the scalar IDCT
+  (`-Djpeg-idct=scalar`) on eight lanes where no step can overflow (that
+  mode: 4:4:4 0.73, 4:2:0 0.55, rgba 1.02, grey 0.55, progressive 0.94,
+  ycck 0.79 against the SSE2 build; 0.36 to 0.66 against the scalar
+  build). Tried and
   dropped (no gain): the grey row as a `@memcpy`; the refill's fast path
-  inlined; a DC-only block filled without the IDCT. Next
+  inlined; a DC-only block filled without the IDCT; the component buffers
+  left unzeroed. Next
   (rgba is the one row near 1: the port's RGBA costs what its RGB does, so
   the decode itself must get faster): Huffman and per-block overhead, the
   scalar IDCT on vectors where no step can overflow. Resume: measure a

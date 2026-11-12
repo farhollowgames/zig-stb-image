@@ -1546,6 +1546,27 @@ const Plain = struct {
     }
 };
 
+/// `Plain` on eight lanes at once.
+const Lanes = struct {
+    const Num = I32x8;
+
+    inline fn add(_: *Lanes, x: I32x8, y: I32x8) I32x8 {
+        return x + y;
+    }
+    inline fn sub(_: *Lanes, x: I32x8, y: I32x8) I32x8 {
+        return x - y;
+    }
+    inline fn mul(_: *Lanes, x: I32x8, comptime c: i32) I32x8 {
+        return x * @as(I32x8, @splat(c));
+    }
+    inline fn shr(_: *Lanes, x: I32x8, comptime shift: u5) I32x8 {
+        return x >> @splat(shift);
+    }
+    inline fn constant(_: *Lanes, comptime c: i32) I32x8 {
+        return @splat(c);
+    }
+};
+
 const Checked = struct {
     const Num = i64;
     overflow: bool = false,
@@ -1653,6 +1674,34 @@ fn idctPass(
 /// coefficients, into `out` with rows `out_stride` apart. Fails where the
 /// original's `int` arithmetic overflows.
 fn idctBlock(out: []u8, out_stride: usize, data: *const [64]i16) error{Overflow}!void {
+    // Where no step of either pass can overflow, eight columns (then rows)
+    // at once: the same arithmetic as below, where a column with only its DC
+    // term also gives `4 * dc` eight times.
+    const coefficients: @Vector(64, i16) = data.*;
+    if (@reduce(.Max, @abs(coefficients)) <= column_input_max) {
+        var a: Lanes = .{};
+        var rows: [8]I32x8 = undefined;
+        for (&rows, 0..) |*row, i| row.* = @as(I16x8, data[i * 8 ..][0..8].*);
+        const columns = idct1d(Lanes, &a, rows, column_bias, column_shift);
+        var peak: @Vector(8, u32) = @splat(0);
+        for (columns) |column| peak = @max(peak, @abs(column));
+        if (@reduce(.Max, peak) <= row_input_max) {
+            const transformed = idct1d(Lanes, &a, transpose(i32, columns), row_bias, row_shift);
+            const zero: I32x8 = @splat(0);
+            const max: I32x8 = @splat(255);
+            for (transpose(i32, transformed), 0..) |row, i| {
+                const bytes: @Vector(8, u8) = @intCast(@min(@max(row, zero), max));
+                out[i * out_stride ..][0..8].* = bytes;
+            }
+            return;
+        }
+    }
+    return idctBlockByColumns(out, out_stride, data);
+}
+
+/// `idctBlock` one column, then one row, at a time, each by the
+/// arithmetic its values need.
+fn idctBlockByColumns(out: []u8, out_stride: usize, data: *const [64]i16) error{Overflow}!void {
     var val: [64]i32 = undefined;
     for (0..8) |i| {
         var column: [8]i32 = undefined;
@@ -1741,7 +1790,7 @@ fn idctPassSse2(s: [8]I16x8, comptime bias: i32, comptime shift: u5) [8]I16x8 {
 }
 
 /// The 8 by 8 transpose of `rows`, by three rounds of interleaving pairs.
-fn transpose(rows: [8]I16x8) [8]I16x8 {
+fn transpose(comptime T: type, rows: [8]@Vector(8, T)) [8]@Vector(8, T) {
     // `_mm_unpacklo_epi16` and `_mm_unpackhi_epi16`: lanes taken in turn
     // from the low or high halves of `x` and `y` (`~i` is `y`'s lane `i`).
     const low = comptime zip(4, 1, 1, 0);
@@ -1755,8 +1804,8 @@ fn transpose(rows: [8]I16x8) [8]I16x8 {
         inline for (round) |pair| {
             const x = r[pair[0]];
             const y = r[pair[1]];
-            r[pair[0]] = @shuffle(i16, x, y, low);
-            r[pair[1]] = @shuffle(i16, x, y, high);
+            r[pair[0]] = @shuffle(T, x, y, low);
+            r[pair[1]] = @shuffle(T, x, y, high);
         }
     }
     return r;
@@ -1768,7 +1817,7 @@ fn idctBlockSse2(out: []u8, out_stride: usize, data: *const [64]i16) void {
     var rows: [8]I16x8 = undefined;
     for (&rows, 0..) |*row, i| row.* = data[i * 8 ..][0..8].*;
     const columns = idctPassSse2(rows, column_bias, column_shift);
-    const samples = transpose(idctPassSse2(transpose(columns), row_bias, row_shift));
+    const samples = transpose(i16, idctPassSse2(transpose(i16, columns), row_bias, row_shift));
     const zero: I16x8 = @splat(0);
     const max: I16x8 = @splat(255);
     for (samples, 0..) |row, i| {
@@ -2031,5 +2080,30 @@ test "the product test of `mul2ShortsValid` agrees with the original's division"
         for ([_]i32{ std.math.minInt(i32), std.math.maxInt(i32) }) |a| {
             try std.testing.expectEqual(division(a, b), mul2ShortsValid(a, b));
         }
+    }
+}
+
+test "the scalar IDCT on lanes gives the samples of the scalar IDCT by columns" {
+    var prng: std.Random.DefaultPrng = .init(0x5ca1);
+    const random = prng.random();
+    for (0..200_000) |case| {
+        var data: [64]i16 = undefined;
+        // Up to the lanes' limit and past it, and sparse blocks.
+        const magnitude: i16 = switch (case % 4) {
+            0 => column_input_max,
+            1 => std.math.maxInt(i16),
+            2 => 2048,
+            else => 300,
+        };
+        for (&data) |*d| {
+            d.* = random.intRangeAtMost(i16, -magnitude, magnitude);
+            if (case % 2 == 1 and random.uintLessThan(u8, 4) != 0) d.* = 0;
+        }
+        var expected: [8 * 11]u8 = @splat(0xaa);
+        var actual: [8 * 11]u8 = @splat(0xaa);
+        const expected_result = idctBlockByColumns(&expected, 11, &data);
+        const actual_result = idctBlock(&actual, 11, &data);
+        try std.testing.expectEqual(expected_result, actual_result);
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
     }
 }
