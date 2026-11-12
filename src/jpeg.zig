@@ -1074,7 +1074,7 @@ fn convertRow(
                     if (n == 4) o[3] = 255;
                 }
             } else {
-                ycbcrToRgbRow(out, y, coutput[1], coutput[2], n);
+                ycbcrToRgbRow(out, y, coutput[1], coutput[2], null, n);
             }
         } else if (img_n == 4) {
             if (transform == 0) {
@@ -1089,17 +1089,10 @@ fn convertRow(
                 }
             } else if (transform == 2) {
                 // YCCK
-                ycbcrToRgbRow(out, y, coutput[1], coutput[2], n);
-                for (0..x) |i| {
-                    const m = coutput[3][i];
-                    const o = out[i * n ..][0..3];
-                    o[0] = blinn8x8(255 - o[0], m);
-                    o[1] = blinn8x8(255 - o[1], m);
-                    o[2] = blinn8x8(255 - o[2], m);
-                }
+                ycbcrToRgbRow(out, y, coutput[1], coutput[2], coutput[3], n);
             } else {
                 // YCbCr, the fourth component left out.
-                ycbcrToRgbRow(out, y, coutput[1], coutput[2], n);
+                ycbcrToRgbRow(out, y, coutput[1], coutput[2], null, n);
             }
         } else {
             for (0..x) |i| {
@@ -1274,10 +1267,19 @@ const I32xN = @Vector(lanes, i32);
 
 /// `stbi__YCbCr_to_RGB_row`: a reduced-precision conversion, the one the
 /// original's SIMD paths also compute, into `step` (3 or 4) bytes a pixel.
-fn ycbcrToRgbRow(out: []u8, y: []const u8, pcb: []const u8, pcr: []const u8, step: u32) void {
+/// With `black`, YCCK: each colour channel `c` then becomes
+/// `blinn8x8(255 - c, k)`, as the original does after converting.
+fn ycbcrToRgbRow(
+    out: []u8,
+    y: []const u8,
+    pcb: []const u8,
+    pcr: []const u8,
+    black: ?[]const u8,
+    step: u32,
+) void {
     switch (step) {
-        3 => ycbcrToRgb(3, out, y, pcb, pcr),
-        4 => ycbcrToRgb(4, out, y, pcb, pcr),
+        3 => ycbcrToRgb(3, out, y, pcb, pcr, black),
+        4 => ycbcrToRgb(4, out, y, pcb, pcr, black),
         else => unreachable,
     }
 }
@@ -1288,26 +1290,35 @@ fn ycbcrToRgb(
     y: []const u8,
     pcb: []const u8,
     pcr: []const u8,
+    black: ?[]const u8,
 ) void {
     var i: usize = 0;
     while (i + lanes <= y.len) : (i += lanes) {
         const luma = y[i..][0..lanes].*;
-        const pixels = ycbcrPixels(step, luma, pcb[i..][0..lanes].*, pcr[i..][0..lanes].*);
+        const k: ?U8xN = if (black) |b| b[i..][0..lanes].* else null;
+        const pixels = ycbcrPixels(step, luma, pcb[i..][0..lanes].*, pcr[i..][0..lanes].*, k);
         out[i * step ..][0 .. lanes * step].* = pixels;
     }
     // The last few pixels, through zero-filled copies.
     const rest = y.len - i;
     if (rest == 0) return;
-    var parts: [3][lanes]u8 = @splat(@splat(0));
-    for (&parts, [_][]const u8{ y, pcb, pcr }) |*part, samples| {
+    var parts: [4][lanes]u8 = @splat(@splat(0));
+    for (&parts, [_][]const u8{ y, pcb, pcr, black orelse y }) |*part, samples| {
         @memcpy(part[0..rest], samples[i..]);
     }
-    const pixels = ycbcrPixels(step, parts[0], parts[1], parts[2]);
+    const k: ?U8xN = if (black != null) parts[3] else null;
+    const pixels = ycbcrPixels(step, parts[0], parts[1], parts[2], k);
     @memcpy(out[i * step ..][0 .. rest * step], pixels[0 .. rest * step]);
 }
 
 /// `lanes` pixels' colour, interleaved; the alpha of RGBA is 255.
-fn ycbcrPixels(comptime step: usize, luma: U8xN, blue: U8xN, red: U8xN) [lanes * step]u8 {
+fn ycbcrPixels(
+    comptime step: usize,
+    luma: U8xN,
+    blue: U8xN,
+    red: U8xN,
+    black: ?U8xN,
+) [lanes * step]u8 {
     const splat = struct {
         fn f(x: i32) I32xN {
             return @splat(x);
@@ -1326,11 +1337,21 @@ fn ycbcrPixels(comptime step: usize, luma: U8xN, blue: U8xN, red: U8xN) [lanes *
             return @intCast(@min(@max(x, splat(0)), splat(255)));
         }
     }.f;
-    const rg = @shuffle(u8, clamp(r), clamp(g), zip(lanes, 1, 1, 0));
-    if (step == 3) return @shuffle(u8, rg, clamp(b), zip(lanes, 2, 1, 0));
+    var channels: [3]U8xN = .{ clamp(r), clamp(g), clamp(b) };
+    if (black) |k| {
+        for (&channels) |*c| c.* = blinn8x8Lanes(@as(U8xN, @splat(255)) - c.*, k);
+    }
+    const rg = @shuffle(u8, channels[0], channels[1], zip(lanes, 1, 1, 0));
+    if (step == 3) return @shuffle(u8, rg, channels[2], zip(lanes, 2, 1, 0));
     const alpha: U8xN = @splat(255);
-    const ba = @shuffle(u8, clamp(b), alpha, zip(lanes, 1, 1, 0));
+    const ba = @shuffle(u8, channels[2], alpha, zip(lanes, 1, 1, 0));
     return @shuffle(u8, rg, ba, zip(lanes, 2, 2, 0));
+}
+
+/// `blinn8x8` on each lane; every step fits 16 bits.
+fn blinn8x8Lanes(x: U8xN, y: U8xN) U8xN {
+    const t = @as(U16xN, x) * @as(U16xN, y) + @as(U16xN, @splat(128));
+    return @intCast((t + (t >> @splat(8))) >> @splat(8));
 }
 
 /// `stbi__blinn_8x8`: `x * y / 255`, rounded.
@@ -1858,11 +1879,12 @@ fn ycbcrToRgbPixel(out: []u8, luma: u8, blue: u8, red: u8) void {
     if (out.len == 4) out[3] = 255;
 }
 
-test "the vector YCbCr conversion gives the bytes of the scalar one for every colour" {
+test "the vector YCbCr and YCCK conversion gives the bytes of the scalar one for every colour" {
     var luma: [256 + 9]u8 = undefined;
     for (&luma, 0..) |*y, i| y.* = @truncate(i * 7);
     var blue: [luma.len]u8 = undefined;
     var red: [luma.len]u8 = undefined;
+    var black: [luma.len]u8 = undefined;
     var expected: [luma.len * 4]u8 = undefined;
     var actual: [luma.len * 4 + 1]u8 = undefined;
     for (0..256) |cb| {
@@ -1871,15 +1893,23 @@ test "the vector YCbCr conversion gives the bytes of the scalar one for every co
             const len = 256 + (cb + cr) % 10;
             @memset(blue[0..len], @intCast(cb));
             @memset(red[0..len], @intCast(cr));
+            for (black[0..len], 0..) |*k, i| k.* = @truncate(cb * 3 + cr * 5 + i);
             for ([_]u32{ 3, 4 }) |step| {
                 const size = len * step;
-                for (0..len) |i| {
-                    ycbcrToRgbPixel(expected[i * step ..][0..step], luma[i], blue[i], red[i]);
+                for ([_]?[]const u8{ null, black[0..len] }) |ycck| {
+                    for (0..len) |i| {
+                        const o = expected[i * step ..][0..step];
+                        ycbcrToRgbPixel(o, luma[i], blue[i], red[i]);
+                        if (ycck) |k| {
+                            for (o[0..3]) |*c| c.* = blinn8x8(255 - c.*, k[i]);
+                        }
+                    }
+                    actual[size] = 0xaa;
+                    const in = .{ luma[0..len], blue[0..len], red[0..len] };
+                    ycbcrToRgbRow(actual[0..size], in[0], in[1], in[2], ycck, step);
+                    try std.testing.expectEqualSlices(u8, expected[0..size], actual[0..size]);
+                    try std.testing.expectEqual(0xaa, actual[size]);
                 }
-                actual[size] = 0xaa;
-                ycbcrToRgbRow(actual[0..size], luma[0..len], blue[0..len], red[0..len], step);
-                try std.testing.expectEqualSlices(u8, expected[0..size], actual[0..size]);
-                try std.testing.expectEqual(0xaa, actual[size]);
             }
         }
     }
