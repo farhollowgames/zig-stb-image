@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const common = @import("common.zig");
-const postprocess = @import("postprocess.zig");
 
 const Source = common.Source;
 const Error = common.Error;
@@ -228,11 +227,16 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
     const size = [_]i64{ target, source.img_x, source.img_y };
     if (!common.sizesValid(limits, &size, 0)) return source.fail(error.TooLargeBmp);
     const out = try common.allocChecked(u8, gpa, limits, &size, 0);
-    decodePixels(source, header, palette_len, target, out) catch |err| {
+    const rows: Rows = .{
+        .out = out,
+        .len = @as(usize, source.img_x) * target,
+        .height = source.img_y,
+        .bottom_up = bottom_up,
+    };
+    decodePixels(source, header, palette_len, target, rows) catch |err| {
         gpa.free(out);
         return err;
     };
-    if (bottom_up) postprocess.verticalFlip(u8, out, source.img_x, source.img_y, target);
 
     const pixels = if (req_comp != 0 and req_comp != target)
         try common.convertFormat(gpa, limits, out, target, req_comp, source.img_x, source.img_y)
@@ -246,25 +250,40 @@ pub fn load(gpa: std.mem.Allocator, source: *Source, request: common.Request) Er
     };
 }
 
+/// The output's rows, which the decoder fills in file order: from the last
+/// up for a bottom-up file, so the image comes out top row first.
+const Rows = struct {
+    out: []u8,
+    len: usize,
+    height: u32,
+    bottom_up: bool,
+
+    /// The output row of the file's row `y`.
+    fn row(rows: Rows, y: usize) []u8 {
+        const index = if (rows.bottom_up) rows.height - 1 - y else y;
+        return rows.out[index * rows.len ..][0..rows.len];
+    }
+};
+
 fn decodePixels(
     source: *Source,
     header: Header,
     palette_len: i32,
     target: u3,
-    out: []u8,
+    rows: Rows,
 ) Error!void {
     var all_a = header.all_a;
     if (header.bpp < 16) {
         if (palette_len == 0 or palette_len > 256) return source.fail(error.InvalidBmp);
-        try decodePalette(source, header, palette_len, target, out);
+        try decodePalette(source, header, palette_len, target, rows);
     } else {
         source.skip(header.offset - header.extra_read - header.size);
-        try decodeMasked(source, header, target, out, &all_a);
+        try decodeMasked(source, header, target, rows, &all_a);
     }
     // An alpha channel of all zeros is taken as no alpha at all.
     if (target == 4 and all_a == 0) {
         var i: usize = 3;
-        while (i < out.len) : (i += 4) out[i] = 255;
+        while (i < rows.out.len) : (i += 4) rows.out[i] = 255;
     }
 }
 
@@ -277,7 +296,7 @@ fn decodeMasked(
     source: *Source,
     header: Header,
     target: u3,
-    out: []u8,
+    rows: Rows,
     all_a: *u32,
 ) Error!void {
     const width: u64 = source.img_x;
@@ -313,37 +332,107 @@ fn decodeMasked(
             if (count > 8) return source.fail(error.BadBmpMasks);
         }
     }
-    var z: usize = 0;
-    for (0..height) |_| {
-        if (layout != .masked) {
-            for (0..width) |_| {
-                out[z + 2] = source.get8();
-                out[z + 1] = source.get8();
-                out[z + 0] = source.get8();
-                z += 3;
-                const a: u8 = if (layout == .bgra) source.get8() else 255;
-                all_a.* |= a;
+    for (0..height) |y| {
+        const out = rows.row(y);
+        switch (layout) {
+            inline .bgr, .bgra => |l| {
+                const in_n = if (l == .bgr) 3 else 4;
                 if (target == 4) {
-                    out[z] = a;
-                    z += 1;
+                    decodeBgrRow(source, in_n, 4, out, all_a);
+                } else {
+                    decodeBgrRow(source, in_n, 3, out, all_a);
                 }
-            }
-        } else {
-            for (0..width) |_| {
-                const v: u32 = if (header.bpp == 16) source.get16le() else source.get32le();
-                out[z + 0] = @truncate(shiftSigned(v & mr, shifts[0], counts[0]));
-                out[z + 1] = @truncate(shiftSigned(v & mg, shifts[1], counts[1]));
-                out[z + 2] = @truncate(shiftSigned(v & mb, shifts[2], counts[2]));
-                z += 3;
-                const a: u32 = if (ma != 0) shiftSigned(v & ma, shifts[3], counts[3]) else 255;
-                all_a.* |= a;
-                if (target == 4) {
-                    out[z] = @truncate(a);
-                    z += 1;
+            },
+            .masked => {
+                var z: usize = 0;
+                for (0..width) |_| {
+                    const v: u32 = if (header.bpp == 16) source.get16le() else source.get32le();
+                    out[z + 0] = @truncate(shiftSigned(v & mr, shifts[0], counts[0]));
+                    out[z + 1] = @truncate(shiftSigned(v & mg, shifts[1], counts[1]));
+                    out[z + 2] = @truncate(shiftSigned(v & mb, shifts[2], counts[2]));
+                    z += 3;
+                    const a: u32 = if (ma != 0) shiftSigned(v & ma, shifts[3], counts[3]) else 255;
+                    all_a.* |= a;
+                    if (target == 4) {
+                        out[z] = @truncate(a);
+                        z += 1;
+                    }
                 }
-            }
+            },
         }
         source.skip(pad);
+    }
+}
+
+/// The pixels a vector step of `decodeBgrRow` converts.
+const lanes = 16;
+
+/// The shuffle mask that turns `lanes` pixels of `in_n` bytes, BGR or BGRA,
+/// into RGB or RGBA; alpha from no source byte is the second operand's 255.
+fn bgrMask(comptime in_n: usize, comptime out_n: usize) @Vector(lanes * out_n, i32) {
+    var mask: [lanes * out_n]i32 = undefined;
+    for (&mask, 0..) |*m, j| {
+        const pixel = j / out_n;
+        const channel = j % out_n;
+        m.* = if (channel < 3)
+            @intCast(pixel * in_n + 2 - channel)
+        else if (in_n == 4)
+            @intCast(pixel * in_n + 3)
+        else
+            -1;
+    }
+    return mask;
+}
+
+/// One row of `in_n`-byte BGR or BGRA pixels into `out`, `out_n`-byte RGB
+/// or RGBA, or-ing every alpha byte read into `all_a` (255 for BGR).
+fn decodeBgrRow(
+    source: *Source,
+    comptime in_n: usize,
+    comptime out_n: usize,
+    out: []u8,
+    all_a: *u32,
+) void {
+    const width = out.len / out_n;
+    if (in_n == 3 and width > 0) all_a.* |= 255;
+    const bytes = source.takeBuffered(width * in_n) orelse {
+        // Bytes past the buffer: one at a time, through the reader or as
+        // zeros past the end.
+        for (0..width) |x| {
+            const pixel = out[x * out_n ..][0..out_n];
+            pixel[2] = source.get8();
+            pixel[1] = source.get8();
+            pixel[0] = source.get8();
+            const a: u8 = if (in_n == 4) source.get8() else 255;
+            all_a.* |= a;
+            if (out_n == 4) pixel[3] = a;
+        }
+        return;
+    };
+    const opaque_alpha: @Vector(1, u8) = @splat(255);
+    var alpha_bits: @Vector(lanes * in_n, u8) = @splat(0);
+    var x: usize = 0;
+    while (x + lanes <= width) : (x += lanes) {
+        const v: @Vector(lanes * in_n, u8) = bytes[x * in_n ..][0 .. lanes * in_n].*;
+        alpha_bits |= v;
+        out[x * out_n ..][0 .. lanes * out_n].* = @shuffle(u8, v, opaque_alpha, bgrMask(in_n, out_n));
+    }
+    if (in_n == 4) {
+        // Only the alpha lanes, every fourth.
+        const alpha_lanes = comptime blk: {
+            var mask: [lanes]i32 = undefined;
+            for (&mask, 0..) |*m, i| m.* = @intCast(i * 4 + 3);
+            break :blk mask;
+        };
+        all_a.* |= @reduce(.Or, @shuffle(u8, alpha_bits, undefined, alpha_lanes));
+    }
+    for (x..width) |i| {
+        const pixel = out[i * out_n ..][0..out_n];
+        const in = bytes[i * in_n ..][0..in_n];
+        pixel[0..3].* = .{ in[2], in[1], in[0] };
+        const a: u8 = if (in_n == 4) in[3] else 255;
+        all_a.* |= a;
+        if (out_n == 4) pixel[3] = a;
     }
 }
 
@@ -352,7 +441,7 @@ fn decodePalette(
     header: Header,
     palette_len: i32,
     target: u3,
-    out: []u8,
+    rows: Rows,
 ) Error!void {
     const width: u64 = source.img_x;
     const height: u64 = source.img_y;
@@ -377,9 +466,10 @@ fn decodePalette(
         else => return source.fail(error.BadBmpBitsPerPixel),
     };
     const pad = padding(row_bytes);
-    var z: usize = 0;
-    if (header.bpp == 1) {
-        for (0..height) |_| {
+    for (0..height) |y| {
+        const out = rows.row(y);
+        var z: usize = 0;
+        if (header.bpp == 1) {
             var bit_offset: u3 = 7;
             var v = source.get8();
             for (0..width) |i| {
@@ -391,10 +481,7 @@ fn decodePalette(
                     v = source.get8();
                 } else bit_offset -= 1;
             }
-            source.skip(pad);
-        }
-    } else {
-        for (0..height) |_| {
+        } else {
             var i: u64 = 0;
             while (i < width) : (i += 2) {
                 var v = source.get8();
@@ -408,8 +495,8 @@ fn decodePalette(
                 v = if (header.bpp == 8) source.get8() else v2;
                 putEntry(&palette, v, target, out, &z);
             }
-            source.skip(pad);
         }
+        source.skip(pad);
     }
 }
 

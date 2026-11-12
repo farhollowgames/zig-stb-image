@@ -114,6 +114,24 @@ performance pass, the skeptic's review, the fixes) are not started.
   `port/bmp-tga-psd-pnm` and `port/gif-hdr-pic` (local only, worktrees under
   `~/Projects/zig-stb-image.wt/`), all merged into `main`.
 
+### Performance: pixels (BMP, PSD, TGA, component conversion)
+
+On branch `perf/pixels` (worktree `~/Projects/zig-stb-image.wt/perf-pixels`).
+Ratios are port time / original SSE2 time, `--rounds 3`, busy machine.
+
+- **Done:** BMP palette entries the original never reads read as zero.
+  BMP decodes each row into its final place (no flip pass) and swaps BGR(A)
+  to RGB(A) 16 pixels at a time with `@shuffle` when the row is in the
+  source's buffer (`Source.takeBuffered`): bmp 24-bit 1.80 to 0.06, bmp
+  32-bit 2.07 to 0.05.
+- **Now:** bmp 24-bit 0.06, bmp 32-bit 0.05, psd raw 1.30, psd rle 1.14,
+  tga raw 1.42, tga rle 1.00, pnm 8-bit 1.03, pnm 16-bit 1.01.
+- **Left:** PSD (vector white-matte removal, planar to interleaved copy,
+  PackBits runs from the buffer), TGA (BGR swap, flip), the vertical flip,
+  `convertFormat`.
+- **Resume:** `stbi-build <worktree> bench -- --filter <format> --rounds 3`
+  before and after each change; `test -Dtest-filter=<format>_test` after.
+
 ## Formats
 
 | format | upstream | zig-stb-image | tests | state |

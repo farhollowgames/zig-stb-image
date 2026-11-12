@@ -280,6 +280,17 @@ pub const Source = struct {
         return false;
     }
 
+    /// The next `len` bytes, when all of them are in the buffer, read as
+    /// `len` calls of `get8` would read them; null otherwise, reading
+    /// nothing. Lets a decoder work on whole rows where the input allows.
+    pub inline fn takeBuffered(source: *Source, len: usize) ?[]const u8 {
+        // After a skip from memory, `pos` may be past `end`.
+        if (source.pos > source.end or source.end - source.pos < len) return null;
+        const bytes = source.base[source.pos..][0..len];
+        source.pos += len;
+        return bytes;
+    }
+
     pub fn get16be(source: *Source) u16 {
         const high: u16 = source.get8();
         return (high << 8) | source.get8();
