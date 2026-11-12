@@ -158,13 +158,40 @@ from Wyhash of `i`, keyed by the test's recorded seed plus `N` from
 
 ### Malformed input and the original's unsafe cases
 
-`zig build sanitize` runs every test's calls to the original, and only the
-original, through a build of it with AddressSanitizer and
-UndefinedBehaviorSanitizer (the system clang), and lists the calls they
-flag in `zig-out/sanitize/report.txt`. Each call runs in a process of its
-own, so an overrun cannot corrupt the calls after it, and every call gets
-UndefinedBehaviorSanitizer's reports, which come once per source line per
-process.
+`zig build sanitize` runs every test's calls to the original through a
+build of it with AddressSanitizer and UndefinedBehaviorSanitizer (the
+system clang), and for each call a sanitizer flags, runs the port on the
+same input and request. Each call runs in a child process whose
+sanitizers stop at the first report, so a report ends the child with a
+non-zero status, an overrun cannot corrupt the calls after it, and a report
+is never paired with another call (the child's error output comes back
+through a pipe). One child runs the call through both builds of the
+original; after a flag on the SIMD build, a new child runs the scalar one.
+`zig-out/sanitize/<filters>/` gets `report.txt`, a line per flagged call
+and build (the call, the build, the report's kind, access and first frame
+in the original, and whether the port refuses or accepts), `accepted.txt`,
+the flagged calls the port accepts, `counts.txt` and the full log.
+`tools/sanitize-all.sh` runs it once per test file (`-Dtest-filter`), so
+each build stays short and a stopped pass resumes where it was, and
+`tools/sanitize-merge.sh` merges the runs into `zig-out/sanitize/`. The
+port follows the SSE2 build's JPEG IDCT by default, so the scalar build's
+IDCT overflows are flagged calls the port accepts; the JPEG file runs again
+with `-Djpeg-idct=scalar` (`SANITIZE_ARGS=-Djpeg-idct=scalar`) to check the
+scalar port's refusals. A child stops after 20 seconds (the original loops
+for ever on a zlib initial size of 0), and a segmentation fault is
+reported by Zig's handler, which the test runner installs over the
+sanitizer's, as "died, signal 6: Segmentation fault at address …".
+
+On 12 November 2026 the run made 418,326 calls (and the JPEG file's 48,941
+again with the scalar IDCT) in about 20 minutes. 2,465 were flagged; the
+port refuses all but 85 of them, and those 85 are the two cases
+`parity.md` names: an empty IDAT chunk before the data (24 calls, a
+`memcpy` of 0 bytes from a null pointer), and the scalar build's IDCT
+overflows on the SSE2 port (61 calls; the scalar port refuses every one).
+The sanitizers do not see reads of memory never written, on the stack or
+the heap, so the PNG palette, BMP palette, TGA, HDR and JPEG-block cases
+are not among the flagged calls; they rest on reading the C and, for
+JPEG, on the three-fill check below.
 
 Where the original reads out of bounds, reads memory it never wrote,
 overflows an `int` or is otherwise undefined, the port returns an error of

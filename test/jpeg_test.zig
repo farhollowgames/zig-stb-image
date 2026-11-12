@@ -7,6 +7,7 @@
 const std = @import("std");
 const stbi = @import("stb_image");
 const oracle = @import("oracle.zig");
+const fuzz_options = @import("fuzz_options");
 const corpus = @import("corpus.zig");
 const fuzz = @import("fuzz.zig");
 
@@ -988,7 +989,8 @@ test "jpeg: coefficients past 16 bits give the samples of the original build the
     fill[14] = -9250;
     const bytes = try encode(.{ .width = 8, .height = 8, .quant = .one, .fill = fill });
     defer gpa.free(bytes);
-    try std.testing.expect(oracle.originalBuildsDisagree(bytes, .{}));
+    // The sanitizer run calls the original only in child processes.
+    if (!fuzz_options.sanitize) try std.testing.expect(oracle.originalBuildsDisagree(bytes, .{}));
     try expectImage(.{ .width = 8, .height = 8, .quant = .one, .fill = fill }, "builds disagree");
 }
 
@@ -1349,9 +1351,7 @@ test "jpeg: fuzzed progressive JPEGs load as in the original" {
 }
 
 /// Fuzz cases whose coefficients overflow an `int` in the original's
-/// scalar IDCT. The sanitizer reports each overflow check only once per
-/// run, so each case was confirmed alone with
-/// `zig build sanitize -Dfuzz-replay=<case>`.
+/// scalar IDCT: the calls `zig build sanitize` flags in this test.
 const baseline_idct_overflows = [_]fuzz.Unsafe{
     .{ .case = 12, .call = .load },
     .{ .case = 17, .call = .load },
