@@ -418,30 +418,120 @@ fn convertRows(
         => |combo| {
             const a = combo / 8;
             const b = combo % 8;
-            for (0..pixels) |i| {
-                const src = data[i * a ..][0..a];
-                const dest = good[i * b ..][0..b];
-                switch (combo) {
-                    1 * 8 + 2 => {
-                        dest[0] = src[0];
-                        dest[1] = opaque_alpha;
-                    },
-                    1 * 8 + 3 => dest.* = .{ src[0], src[0], src[0] },
-                    1 * 8 + 4 => dest.* = .{ src[0], src[0], src[0], opaque_alpha },
-                    2 * 8 + 1 => dest[0] = src[0],
-                    2 * 8 + 3 => dest.* = .{ src[0], src[0], src[0] },
-                    2 * 8 + 4 => dest.* = .{ src[0], src[0], src[0], src[1] },
-                    3 * 8 + 4 => dest.* = .{ src[0], src[1], src[2], opaque_alpha },
-                    3 * 8 + 1 => dest[0] = luma(src[0], src[1], src[2]),
-                    3 * 8 + 2 => dest.* = .{ luma(src[0], src[1], src[2]), opaque_alpha },
-                    4 * 8 + 1 => dest[0] = luma(src[0], src[1], src[2]),
-                    4 * 8 + 2 => dest.* = .{ luma(src[0], src[1], src[2]), src[3] },
-                    4 * 8 + 3 => dest.* = .{ src[0], src[1], src[2] },
-                    else => comptime unreachable,
-                }
+            // 16 pixels at a time in vector lanes, then the rest one by one.
+            var i: usize = 0;
+            while (i + block <= pixels) : (i += block) {
+                const src = data[i * a ..][0 .. block * a];
+                convertBlock(T, opaque_alpha, combo, src, good[i * b ..][0 .. block * b]);
+            }
+            for (i..pixels) |k| {
+                const from = data[k * a ..][0..a];
+                convertPixel(T, opaque_alpha, luma, combo, from, good[k * b ..][0..b]);
             }
         },
         // The decoders only ask for conversions between 1 to 4 components.
         else => unreachable,
+    }
+}
+
+/// The pixels `convertBlock` converts at once.
+const block = 16;
+
+/// `block` pixels of `convertRows`, with the same arithmetic in vector
+/// lanes. Each output sample is a source sample moved by a shuffle, opaque
+/// alpha, or the luma of the source's first three samples.
+fn convertBlock(
+    comptime T: type,
+    comptime opaque_alpha: T,
+    comptime combo: u8,
+    src: *const [block * (combo / 8)]T,
+    dest: *[block * (combo % 8)]T,
+) void {
+    const a = combo / 8;
+    const b = combo % 8;
+    const Out = @Vector(block * b, T);
+    const v: @Vector(block * a, T) = src.*;
+    // For each output lane: the source lane it takes, or none for a lane
+    // of opaque alpha or of luma.
+    const plan = comptime blk: {
+        var lanes: [block * b]i32 = undefined;
+        var constant: [block * b]bool = undefined;
+        var is_luma: [block * b]bool = undefined;
+        for (0..block * b) |m| {
+            const pixel = m / b;
+            const channel = m % b;
+            const grey_out = b <= 2;
+            const alpha_out = b == 2 or b == 4;
+            var from: ?usize = null;
+            is_luma[m] = false;
+            if (alpha_out and channel == b - 1) {
+                // Alpha: the source's, if it has one.
+                if (a == 2 or a == 4) from = a - 1;
+            } else if (grey_out and a >= 3) {
+                is_luma[m] = true;
+            } else if (a <= 2) {
+                from = 0;
+            } else {
+                from = channel;
+            }
+            lanes[m] = if (from) |c| @intCast(pixel * a + c) else 0;
+            constant[m] = from == null and !is_luma[m];
+        }
+        break :blk .{ .lanes = lanes, .constant = constant, .is_luma = is_luma };
+    };
+    const Lanes = @Vector(block * b, bool);
+    var out: Out = @shuffle(T, v, undefined, @as(@Vector(block * b, i32), plan.lanes));
+    out = @select(T, @as(Lanes, plan.constant), @as(Out, @splat(opaque_alpha)), out);
+    if (a >= 3 and b <= 2) {
+        const Wide = @Vector(block, u32);
+        const r: Wide = @shuffle(T, v, undefined, channelOf(a, 0));
+        const g: Wide = @shuffle(T, v, undefined, channelOf(a, 1));
+        const bl: Wide = @shuffle(T, v, undefined, channelOf(a, 2));
+        const y: @Vector(block, T) = @truncate((r * @as(Wide, @splat(77)) +
+            g * @as(Wide, @splat(150)) + @as(Wide, @splat(29)) * bl) >> @splat(8));
+        const spread = @shuffle(T, y, undefined, spreadOf(b));
+        out = @select(T, @as(Lanes, plan.is_luma), spread, out);
+    }
+    dest.* = out;
+}
+
+/// The lanes of channel `channel` of `block` pixels of `n` samples.
+fn channelOf(comptime n: usize, comptime channel: usize) @Vector(block, i32) {
+    var lanes: [block]i32 = undefined;
+    for (&lanes, 0..) |*lane, k| lane.* = @intCast(k * n + channel);
+    return lanes;
+}
+
+/// Each pixel's lane, repeated over its `n` samples.
+fn spreadOf(comptime n: usize) @Vector(block * n, i32) {
+    var lanes: [block * n]i32 = undefined;
+    for (&lanes, 0..) |*lane, m| lane.* = @intCast(m / n);
+    return lanes;
+}
+
+/// One pixel of `convertRows`: `combo` is the source components times 8
+/// plus the destination's.
+inline fn convertPixel(
+    comptime T: type,
+    comptime opaque_alpha: T,
+    comptime luma: fn (u32, u32, u32) T,
+    comptime combo: u8,
+    src: *const [combo / 8]T,
+    dest: *[combo % 8]T,
+) void {
+    switch (combo) {
+        1 * 8 + 2 => dest.* = .{ src[0], opaque_alpha },
+        1 * 8 + 3 => dest.* = .{ src[0], src[0], src[0] },
+        1 * 8 + 4 => dest.* = .{ src[0], src[0], src[0], opaque_alpha },
+        2 * 8 + 1 => dest[0] = src[0],
+        2 * 8 + 3 => dest.* = .{ src[0], src[0], src[0] },
+        2 * 8 + 4 => dest.* = .{ src[0], src[0], src[0], src[1] },
+        3 * 8 + 4 => dest.* = .{ src[0], src[1], src[2], opaque_alpha },
+        3 * 8 + 1 => dest[0] = luma(src[0], src[1], src[2]),
+        3 * 8 + 2 => dest.* = .{ luma(src[0], src[1], src[2]), opaque_alpha },
+        4 * 8 + 1 => dest[0] = luma(src[0], src[1], src[2]),
+        4 * 8 + 2 => dest.* = .{ luma(src[0], src[1], src[2]), src[3] },
+        4 * 8 + 3 => dest.* = .{ src[0], src[1], src[2] },
+        else => comptime unreachable,
     }
 }
