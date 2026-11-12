@@ -52,9 +52,26 @@ pub const Error = error{
     CannotMergeDcAndAc,
     CannotOpenFile,
     DimensionTooLarge,
+    /// stb_image's GIF header sets the failure reason to the empty string;
+    /// a GIF that then fails without a reason of its own reports it.
+    EmptyReason,
     ExpectedMarker,
     FirstNotIhdr,
+    /// A GIF frame disposes of the frame before it by restoring the one
+    /// before that, from the third frame on: stb_image reads that frame
+    /// from outside its buffer, so the port refuses the file.
+    GifDisposeToPrevious,
+    /// A flipped GIF animation of fewer than 4 components and at least 2
+    /// rows: stb_image flips it as 4 components, outside its buffer, so the
+    /// port refuses it.
+    GifFlipComponents,
+    /// A GIF of no pixels with more than one frame: stb_image frees its
+    /// frames twice, so the port refuses it.
+    GifZeroAreaFrames,
     HdrBadRle,
+    /// The flat pixels of an HDR file end early: stb_image converts
+    /// uninitialized memory there, so the port refuses the file.
+    HdrTruncated,
     IdatSizeLimit,
     IllegalGifCode,
     ImageTooLarge,
@@ -198,9 +215,20 @@ fn strings(err: Error) [2][]const u8 {
         error.CannotMergeDcAndAc => .{ "can't merge dc and ac", "Corrupt JPEG" },
         error.CannotOpenFile => .{ "can't fopen", "Unable to open file" },
         error.DimensionTooLarge => .{ "too large", "Very large image (corrupt?)" },
+        error.EmptyReason => .{ "", "" },
         error.ExpectedMarker => .{ "expected marker", "Corrupt JPEG" },
         error.FirstNotIhdr => .{ "first not IHDR", "Corrupt PNG" },
+        error.GifDisposeToPrevious => .{
+            "bad dispose",
+            "GIF frame restores a frame stb_image cannot reach",
+        },
+        error.GifFlipComponents => .{
+            "bad flip",
+            "Flipped GIF animation of fewer than 4 components",
+        },
+        error.GifZeroAreaFrames => .{ "zero size", "GIF of no pixels with several frames" },
         error.HdrBadRle => .{ "corrupt", "bad RLE data in HDR" },
+        error.HdrTruncated => .{ "truncated", "HDR file too short" },
         error.IdatSizeLimit => .{ "IDAT size limit", "IDAT section larger than 2^30 bytes" },
         error.IllegalGifCode => .{ "illegal code in raster", "Corrupt GIF" },
         error.ImageTooLarge => .{ "too large", "Image too large to decode" },

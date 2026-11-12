@@ -16,7 +16,8 @@ fn expectSamePow(x: f64, y: f64) !void {
     const expected = theirs(x, y);
     const actual = stbi.pow(x, y);
     if (bits(expected) != bits(actual)) {
-        std.debug.print("\npow({x}, {x}): the C library gives {x} (0x{x}), the port {x} (0x{x})\n", .{
+        const fmt = "\npow({x}, {x}): the C library gives {x} (0x{x}), the port {x} (0x{x})\n";
+        std.debug.print(fmt, .{
             x, y, expected, bits(expected), actual, bits(actual),
         });
         return error.TestUnexpectedResult;
@@ -130,16 +131,19 @@ test "pow matches the C library on 10^7 random doubles" {
 test "pow matches the C library on special values" {
     const inf = std.math.inf(f64);
     const specials = [_]f64{
-        0,                      -0.0,                    1,                       -1,
-        2,                      -2,                      0.5,                     -0.5,
-        3,                      -3,                      inf,                     -inf,
-        std.math.floatMin(f64), -std.math.floatMin(f64), std.math.floatMax(f64),  -std.math.floatMax(f64),
-        0x1p-1074,              -0x1p-1074,              0x1.fffffffffffffp-1023, 1 + 0x1p-52,
-        1 - 0x1p-53,            0x1p63,                  -0x1p63,                 0x1p-65,
-        -0x1p-65,               0x1p-66,                 1100,                    -1100,
-        1075,                   -1075,                   2.2,                     1.0 / 2.2,
-        0x1.749p62,             0x1.e7b6p-65,            1e308,                   1e-308,
-        9007199254740992,       -9007199254740994,       4503599627370497,        -4503599627370497,
+        0,                       -0.0,                    1,                       -1,
+        2,                       -2,                      0.5,                     -0.5,
+        3,                       -3,                      inf,                     -inf,
+        std.math.floatMin(
+            f64,
+        ),
+        -std.math.floatMin(f64), std.math.floatMax(f64),  -std.math.floatMax(f64), 0x1p-1074,
+        -0x1p-1074,              0x1.fffffffffffffp-1023, 1 + 0x1p-52,             1 - 0x1p-53,
+        0x1p63,                  -0x1p63,                 0x1p-65,                 -0x1p-65,
+        0x1p-66,                 1100,                    -1100,                   1075,
+        -1075,                   2.2,                     1.0 / 2.2,               0x1.749p62,
+        0x1.e7b6p-65,            1e308,                   1e-308,                  9007199254740992,
+        -9007199254740994,       4503599627370497,        -4503599627370497,
     };
     for (specials) |x| {
         for (specials) |y| try expectSamePow(x, y);
@@ -150,7 +154,10 @@ test "pow matches the C library on special values" {
             const expected = theirs(pair[0], pair[1]);
             const actual = stbi.pow(pair[0], pair[1]);
             try std.testing.expectEqual(std.math.isNan(expected), std.math.isNan(actual));
-            if (!std.math.isNan(expected)) try std.testing.expectEqual(bits(expected), bits(actual));
+            if (!std.math.isNan(expected)) try std.testing.expectEqual(
+                bits(expected),
+                bits(actual),
+            );
         }
     }
 }

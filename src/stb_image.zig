@@ -136,13 +136,24 @@ pub fn loadFromFile(
     comptime checkSample(T);
     var source: Source = undefined;
     source.initReader(&file_reader.interface);
-    var image = try loadSource(T, gpa, &source, &options);
+    var image = loadSource(T, gpa, &source, &options) catch |err| {
+        try seekPastEnd(file_reader, &source);
+        return err;
+    };
+    errdefer image.deinit(gpa);
+    try seekPastEnd(file_reader, &source);
     if (T != f32) {
-        errdefer image.deinit(gpa);
         // Give back what the source buffered but did not use.
         try file_reader.seekBy(-@as(i64, @intCast(source.end - source.pos)));
     }
     return image;
+}
+
+/// Where the decoder skipped past the end of the file, the original's
+/// `fseek` leaves the file there; so does the port.
+fn seekPastEnd(file_reader: *std.Io.File.Reader, source: *const Source) FileError!void {
+    if (source.skipped_past_end == 0) return;
+    try file_reader.seekBy(std.math.cast(i64, source.skipped_past_end) orelse std.math.maxInt(i64));
 }
 
 pub const PathError = FileError || std.Io.File.OpenError;
@@ -323,6 +334,12 @@ pub fn loadGifFromMemory(
     var source: Source = .initMemory(bytes);
     var animation = try gif.loadAnimation(gpa, &source, &options);
     if (options.flip_vertically) {
+        // The original flips every frame as 4 components, whatever it
+        // converted them to: past its buffer once there are rows to swap.
+        if (animation.channels != 4 and animation.width > 0 and animation.height >= 2) {
+            animation.deinit(gpa);
+            return error.GifFlipComponents;
+        }
         const slice = @as(usize, animation.width) * animation.height * animation.channels;
         for (0..animation.frames) |frame| {
             const pixels = animation.pixels[frame * slice ..][0..slice];

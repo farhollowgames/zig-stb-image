@@ -46,7 +46,9 @@ pub fn ldrToHdr(
     comp: u3,
 ) Error![]f32 {
     defer gpa.free(data);
-    const output = try common.allocChecked(f32, gpa, options.limits, &.{ x, y, comp, 4 }, 0);
+    // The original checks the size in bytes, four per float.
+    if (!common.sizesValid(options.limits, &.{ x, y, comp, 4 }, 0)) return error.OutOfMemory;
+    const output = try gpa.alloc(f32, @as(usize, x) * y * comp);
     const colour: usize = if (comp & 1 != 0) comp else comp - 1;
     const gamma: f64 = options.ldr_to_hdr_gamma;
     const scale: f64 = options.ldr_to_hdr_scale;

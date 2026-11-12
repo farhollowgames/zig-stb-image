@@ -473,13 +473,36 @@ pub fn expectGifSame(
         var copy = animation;
         copy.deinit(gpa);
     } else |_| {};
+    const req: u32 = options.reqComp();
+    if (options.flip_vertically and req != 0 and req != 4) {
+        // The original flips every frame as 4 components, whatever it
+        // converted them to: past the end of its buffer when it decoded rows
+        // to swap. Find out, without the flip, whether it would.
+        var unflipped = request;
+        unflipped.options.flip_vertically = false;
+        const probe_settings = unflipped.settings();
+        var probe: Result = undefined;
+        upstream.simd_load_gif(bytes.ptr, bytes.len, &probe_settings, &probe);
+        upstream.simd_free(probe.pixels);
+        upstream.simd_free(@ptrCast(probe.delays));
+        if (probe.pixels != null and probe.z > 0 and probe.x > 0 and probe.y >= 2) {
+            if (port) |_| {
+                label.print(request, "gif: the port flipped what the original flips past its buffer", .{});
+                return error.TestUnexpectedResult;
+            } else |_| return;
+        }
+    }
     for ([_]Path{ .simd, .scalar }) |path| {
         var theirs: Result = undefined;
         loadGifFn(path)(bytes.ptr, bytes.len, &settings, &theirs);
         defer freeFn(path)(theirs.pixels);
         defer freeFn(path)(@ptrCast(theirs.delays));
+        // When the first frame fails and other components than 4 are asked
+        // for, the original converts its null result, an image of no
+        // columns, into an empty buffer with no frames: a failure.
+        const theirs_failed = theirs.pixels == null or theirs.z == 0;
         if (port) |animation| {
-            if (theirs.pixels == null) {
+            if (theirs_failed) {
                 label.print(request, "gif {t}: the original fails with \"{s}\", the port decodes {d} frames", .{
                     path, theirs.reason orelse "(null)", animation.frames,
                 });
@@ -491,7 +514,6 @@ pub fn expectGifSame(
                 });
                 return error.TestUnexpectedResult;
             }
-            const req: u32 = options.reqComp();
             const channels: u32 = if (req != 0) req else 4;
             const len = @as(usize, animation.width) * animation.height * animation.frames * channels;
             const original: [*]const u8 = @ptrCast(theirs.pixels.?);
@@ -510,7 +532,7 @@ pub fn expectGifSame(
                 }
             }
         } else |err| {
-            if (theirs.pixels != null) {
+            if (!theirs_failed) {
                 label.print(request, "gif {t}: the original decodes {d} frames, the port fails with {t}", .{
                     path, theirs.z, err,
                 });
