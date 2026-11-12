@@ -2,8 +2,6 @@
 
 Tracks stb_image 2.30 · Zig 0.17 · [status](STATUS.md)
 
-This port is not affiliated with or reviewed by the original authors. Its code was written with AI assistance for Farhollow Games, and is only machine verified. See [the tests](doc/TESTING.md) and [parity with the original](doc/parity.md).
-
 ## What it is
 
 A Zig port of stb_image, Sean Barrett's single-file image loader from
@@ -11,6 +9,10 @@ A Zig port of stb_image, Sean Barrett's single-file image loader from
 HDR, PIC and PNM images to 8-bit, 16-bit or float samples, and gives the
 original's pixels and failure reasons. It is pure Zig, with no dependencies
 beyond the standard library.
+
+This port is not affiliated with or reviewed by the original authors. Its
+code was written with AI assistance for Farhollow Games, and is only machine
+verified. See [the tests](doc/TESTING.md) and [parity with the original](doc/parity.md).
 
 ## Features
 
@@ -32,10 +34,12 @@ beyond the standard library.
 ## Install
 
 ```sh
-zig fetch --save git+https://github.com/farhollowgames/zig-stb-image
+zig fetch --save git+https://github.com/farhollowgames/zig-stb-image#main
 ```
 
-There is no release yet. Then, in `build.zig`:
+There is no release yet; this fetches `main`.
+
+In `build.zig`:
 
 ```zig
 const stb_image = b.dependency("stb_image", .{ .target = target, .optimize = optimize });
@@ -67,8 +71,7 @@ The caller frees the pixels with `image.deinit(gpa)`.
 
 ## Differences from the original
 
-The reasons are in [`doc/parity.md`](doc/parity.md) and
-[`STATUS.md`](STATUS.md#left-out-awaiting-the-authors-approval).
+The reasons are in [`doc/parity.md`](doc/parity.md).
 
 *Additions*:
 
@@ -94,19 +97,19 @@ The reasons are in [`doc/parity.md`](doc/parity.md) and
 
 ## Not included
 
-The parts of the original that are left out, each with its reason, are
-listed in [`STATUS.md`](STATUS.md#build-switches).
+The parts of the original that are left out, each with its reason, are listed in
+[`STATUS.md`](STATUS.md), under "Left out".
 
 ## Testing and benchmarks
 
-162 tests. 159 run the original beside the port on the same inputs and
-compare their results: success, size, channels, every output byte (floats
-by their bits), the failure reason in both forms, and where a file is left.
-The inputs are the test images of other decoders (PngSuite, bmpsuite,
-jpeg-decoder, image-rs, psd-tools, libjpeg-turbo), hand-made edge cases and
-about 27,500 seeded fuzz cases. `zig build sanitize` runs every test input
-through the original under AddressSanitizer and UndefinedBehaviorSanitizer,
-to find the inputs the original is unsafe on.
+`zig build test` runs 162 tests. 159 run the original beside the port on the
+same inputs and compare their results: success, size, channels, every output
+byte (floats by their bits), the failure reason in both forms, and where a
+file is left. The inputs are the test images of other decoders (PngSuite,
+bmpsuite, jpeg-decoder, image-rs, psd-tools, libjpeg-turbo), hand-made edge
+cases and about 27,500 seeded fuzz cases. `zig build sanitize` runs every
+test input through the original under AddressSanitizer and
+UndefinedBehaviorSanitizer, to find the inputs the original is unsafe on.
 
 Port time against original time, for a 960 x 720 photograph:
 

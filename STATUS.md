@@ -29,19 +29,29 @@
   - choices: the PNG palette case could read unset entries as zero
     instead of refusing (decided so for BMP); `-Djpeg-idct` defaults to
     scalar, where upstream's x86-64 default is SSE2.
-- **Open:** the sanitizer run is now one process per call (an overrun of
-  the original corrupted the heap and ended the earlier whole run in the
-  GIF tests), and the whole run takes longer than the 50-minute build
-  limit. Run per test file, it has finished for GIF (23,277 calls, 339
-  flagged, all GIF animations: flipped with fewer than 4 components, and
-  disposal cases) and for PIC and HDR (1,838 flagged: PIC loads that
-  convert the NULL a failed scanline gives, as `doc/parity.md` says; four
-  flagged `is_hdr` queries on PIC tests look misattributed). The flagged
-  calls are not yet matched one by one against the refusals the tests
-  expect, and the other test files are not yet run. AddressSanitizer does
-  not see reads of memory never written (the palette, TGA, HDR and JPEG
-  refusals); those cases rest on reading the C and, for JPEG, on the
-  three-fill check.
+- **Sanitizer run (12 November 2026, branch `review/sanitize`):** every
+  test file through `tools/sanitize-all.sh`, and the JPEG file again with
+  `-Djpeg-idct=scalar`: 418,326 calls, 2,465 flagged, the port refuses
+  2,380 and accepts 85, no report outside the child processes. Per file
+  (calls, flagged, refused, accepted): zlib 13,392/10/10/0 (the initial
+  size of 0, stopped after 20 s); PNG 99,651/48/24/24; GIF 23,278/340/340/0;
+  PIC 23,122/1,838/1,838/0; BMP 61,392/24/24/0; PSD 47,859/94/94/0; JPEG
+  48,941/111/50/61 (with the scalar IDCT 111/111/0); core 3,130, HDR
+  16,284, TGA 60,439, PNM 20,838: none flagged. The 85 accepted calls are
+  the two harmless cases `doc/parity.md` names: the empty IDAT before the
+  data (PNG "damaged case 12", UBSan's null `memcpy` argument in
+  `stbi__getn`), and the scalar build's IDCT overflows (`stbi__idct_block`)
+  on the SSE2 port, which the scalar port refuses. Not seen by the
+  sanitizers, as they read memory never written: the PNG palette, BMP
+  palette, TGA raw, HDR flat and JPEG-block cases, and PIC loads with no
+  components asked for whose packets fail before the channel count is set
+  (the original reads the caller's `*comp`).
+- **Open (for the author):** PIC files of no width or height whose packets
+  fail ("empty", 108 calls of 1 to 3 components): the original converts its
+  null image over no pixels and returns an empty image, which the
+  sanitizers do not flag; the port refuses, as for every PIC packet
+  failure. `doc/parity.md` describes the refusal but not that the
+  original is safe there.
 - **Next:** steps 5 to 7 (see "Work in progress").
 
 Every public function, build option and format of stb_image 2.30 (stb
@@ -79,16 +89,23 @@ performance pass, the skeptic's review, the fixes) are not started.
   and pixels passes (`perf/jpeg`, `perf/png`, `perf/pixels`, merged; their
   subsections below). Every bench row is faster than the original's SSE2
   build; the full test run passes (167 tests).
-- **In progress (step 6 and the sanitizer):** a skeptic agent reviews the
-  branch (findings come back to the lead; probes on `skeptic/probes`), and
-  another agent, on `review/sanitize` (worktree
-  `~/Projects/zig-stb-image.wt/sanitize`), makes `zig build sanitize` say
-  for each call the original is unsafe on whether the port refuses it, and
-  runs it over every test file.
+- **Step 6 is done:** the skeptic's report (12 November 2026) found the
+  `*Path` functions broken (streaming readers cannot seek back), untested
+  claims (the `*Path` queries, the gamma and scale setters, `bytes_max` for
+  four formats, the format switches), comparison holes (BMP unset-pixel
+  fuzz cases, queries on one build only, `buildsDisagree` for any format),
+  memory-only bench rows, and stale docs. No unsafe input was found in the
+  fast paths (the whole suite also passes in ReleaseFast). Probes:
+  `skeptic/probes`, `test/skeptic_probes.zig`.
+- **In progress:** step 7 on `fix/skeptic` (worktree
+  `~/Projects/zig-stb-image.wt/fix`; its STATUS.md subsection "Step 7:
+  fixes" tracks each finding), and the sanitizer matching on
+  `review/sanitize` (worktree `~/Projects/zig-stb-image.wt/sanitize`):
+  `zig build sanitize` says for each call the original is unsafe on whether
+  the port refuses it, run over every test file.
 - **Left to do:**
-  1. Step 7: fix each confirmed skeptic finding with a test that fails
-     first; merge `review/sanitize` and act on any unsafe input the port
-     accepts.
+  1. Merge `fix/skeptic` and `review/sanitize`; act on any unsafe input
+     the port accepts.
   2. Merge `main` (where another agent fixes the READMEs) into this branch,
      then update README.md: `-Djpeg-idct` defaults to `sse2` on x86-64, the
      BMP palette change, the "Not included" link (`#left-out-approved`),
@@ -98,14 +115,17 @@ performance pass, the skeptic's review, the fixes) are not started.
 - **Builds:** one at a time, under the memory cap, as
   `timeout 3000 systemd-run --user --scope -q -p MemoryMax=6G zig build <step> -j3`.
   The full test run peaks near 6 GB and takes about 6 minutes.
-- **Resume the sanitizer run:** run it per test file
-  (`zig build sanitize -Dtest-filter=<file prefix>`) so each stays under
-  the 50-minute limit, or fork only for the calls the tests expect to be
-  unsafe; then check every flagged call against `doc/parity.md`.
 - **Sanitizer run:** `zig build sanitize` runs every test's calls to the
-  original, each in a process of its own, through a build of it with
-  AddressSanitizer and UndefinedBehaviorSanitizer (system clang), and lists
-  the flagged calls in `zig-out/sanitize/report.txt`.
+  original through a build of it with AddressSanitizer and
+  UndefinedBehaviorSanitizer (system clang), each call in child processes
+  that stop at the first report, and runs the port on each flagged call;
+  `zig-out/sanitize/<filters>/` gets `report.txt`, `accepted.txt` and
+  `counts.txt` (`doc/TESTING.md`). To run or resume the whole pass:
+  `tools/sanitize-all.sh` (one build per test file, skipping files with a
+  `counts.txt`; `ZIG_BUILD` gives the build command, `SANITIZE_ARGS`
+  more options such as `-Djpeg-idct=scalar`), which ends with
+  `tools/sanitize-merge.sh zig-out/sanitize`. Each file takes a few
+  minutes; the whole pass about 20.
 - **Branches:** the decoders were written on `port/png`, `port/jpeg`,
   `port/bmp-tga-psd-pnm` and `port/gif-hdr-pic` (local only, worktrees under
   `~/Projects/zig-stb-image.wt/`), all merged into `main`.

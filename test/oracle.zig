@@ -453,7 +453,7 @@ pub fn expectLoadSame(
     label: Label,
     expect: Expect,
 ) !void {
-    if (fuzz_options.sanitize) return sanitizeCall(bytes, request, label, "load", .load);
+    if (fuzz_options.sanitize) return sanitizeCall(gpa, bytes, request, label, .{ .load = expect });
     var files: Files = .{};
     if (request.via == .file or request.via == .file_streaming) {
         files.mem = try MemFile.init(bytes, request.file_offset);
@@ -586,7 +586,9 @@ pub fn expectQuerySame(
     label: Label,
 ) !void {
     const request: Request = .{ .via = via };
-    if (fuzz_options.sanitize) return sanitizeCall(bytes, request, label, @tagName(query), .{ .query = query });
+    if (fuzz_options.sanitize) {
+        return sanitizeCall(std.testing.allocator, bytes, request, label, .{ .query = query });
+    }
     var files: Files = .{};
     if (via == .file or via == .file_streaming) files.mem = try MemFile.init(bytes, 0);
     defer if (files.mem) |m| m.deinit();
@@ -703,12 +705,21 @@ pub fn expectAll(gpa: std.mem.Allocator, bytes: []const u8, label: Label, expect
         try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .callbacks }, label, expect);
         const from_file: Request = .{ .bits = bits, .via = .file, .file_offset = 3 };
         try expectLoadSame(gpa, bytes, from_file, label, expect);
-        try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .path }, label, expect);
+        if (!fuzz_options.sanitize) {
+            try expectLoadSame(gpa, bytes, .{ .bits = bits, .via = .path }, label, expect);
+        }
     }
-    const streaming: Request = .{ .via = .file_streaming, .file_offset = 3 };
-    try expectLoadSame(gpa, bytes, streaming, label, expect);
+    // The sanitizer run reads every file as callbacks, so a load by path or
+    // through a reader that cannot seek would repeat a call it has made.
+    if (!fuzz_options.sanitize) {
+        const streaming: Request = .{ .via = .file_streaming, .file_offset = 3 };
+        try expectLoadSame(gpa, bytes, streaming, label, expect);
+    }
     for ([_]Query{ .info, .is_16_bit, .is_hdr }) |query| {
-        for (std.enums.values(Via)) |via| try expectQuerySame(bytes, query, via, label);
+        for (std.enums.values(Via)) |via| {
+            if (fuzz_options.sanitize and (via == .path or via == .file_streaming)) continue;
+            try expectQuerySame(bytes, query, via, label);
+        }
     }
 }
 
@@ -728,7 +739,7 @@ pub fn expectGifSame(
     label: Label,
 ) !void {
     const request: Request = .{ .options = options };
-    if (fuzz_options.sanitize) return sanitizeCall(bytes, request, label, "gif", .gif);
+    if (fuzz_options.sanitize) return sanitizeCall(gpa, bytes, request, label, .gif);
     const settings = request.settings();
     const port = stbi.loadGifFromMemory(gpa, bytes, options);
     defer if (port) |animation| {
@@ -810,66 +821,89 @@ pub fn expectGifSame(
     }
 }
 
-const SanitizeCall = union(enum) { load, query: Query, gif };
+// ---- The sanitizer run ----------------------------------------------------
 
-/// Under `zig build sanitize`: names the call on stderr, then runs only the
-/// original, built with AddressSanitizer and UndefinedBehaviorSanitizer,
-/// whose reports follow the name. `tools/sanitize.sh` pairs them up.
-///
-/// Each call runs in a child process of its own. The sanitizers keep going
-/// after a report, and an overrun the original makes can corrupt the heap
-/// for every call after it; and UndefinedBehaviorSanitizer reports each
-/// source line once per process, so a fresh process reports every call.
+const SanitizeCall = union(enum) { load: Expect, query: Query, gif };
+
+/// Under `zig build sanitize`: runs `call` through both builds of the
+/// original, built with AddressSanitizer and UndefinedBehaviorSanitizer, in
+/// child processes (see `runOriginal`). For each build a sanitizer flags,
+/// it prints a `stbi-flagged:` line with what the port does on the same
+/// input and request, so `tools/sanitize.sh` can list the flagged calls the
+/// port accepts. Every call first prints a `stbi-call:` line, to be counted.
 fn sanitizeCall(
+    gpa: std.mem.Allocator,
     bytes: []const u8,
     request: Request,
     label: Label,
-    call_name: []const u8,
     call: SanitizeCall,
 ) !void {
-    std.debug.print("stbi-case: {s} seed {?d} case {?d} call {s} | {t} via {t} components {t} flip {}\n", .{
-        label.name,
-        label.seed,
-        label.case,
-        call_name,
-        request.bits,
-        request.via,
-        request.options.components,
-        request.options.flip_vertically,
-    });
-    const pid = std.c.fork();
-    if (pid < 0) return error.ForkFailed;
-    if (pid == 0) {
-        sanitizedCalls(bytes, request, call);
-        std.c._exit(0);
-    }
-    var status: c_int = 0;
-    if (std.c.waitpid(pid, &status, 0) != pid) return error.WaitFailed;
-    const bits: u32 = @bitCast(status);
-    if (std.os.linux.W.IFSIGNALED(bits)) {
-        std.debug.print("stbi-crash: the original died of signal {d}\n", .{
-            @backingInt(std.os.linux.W.TERMSIG(bits)),
-        });
-    } else if (std.os.linux.W.EXITSTATUS(bits) != 0) {
-        std.debug.print("stbi-crash: the original exited with {d}\n", .{
-            std.os.linux.W.EXITSTATUS(bits),
-        });
-    }
+    var label_buffer: [256]u8 = undefined;
+    const text = try sanitizeLabel(&label_buffer, label, request, call);
+    const number = sanitizeStart(text);
+    const original: OriginalCall = .{ .bytes = bytes, .request = request, .call = call };
+    const flags = try runOriginal(OriginalCall, &original, OriginalCall.run, &.{ .simd, .scalar });
+    if (!flags.any()) return;
+    var outcome_buffer: [64]u8 = undefined;
+    const outcome = try portOutcome(gpa, &outcome_buffer, bytes, request, call);
+    flags.print(number, text, outcome);
 }
 
-fn sanitizedCalls(bytes: []const u8, request: Request, call: SanitizeCall) void {
-    // Files go through memory here: the original reads them as it reads
-    // callbacks, and the sanitizer run needs no descriptors.
-    var settings = request.settings();
-    if (request.via == .file) settings.via = @backingInt(Via.callbacks);
-    for ([_]Path{ .simd, .scalar }) |path| {
+/// The call's name in the sanitizer's report: the input, the call and the
+/// request, and for loads what the test expects of the port.
+fn sanitizeLabel(buffer: []u8, label: Label, request: Request, call: SanitizeCall) ![]const u8 {
+    const o = request.options;
+    var writer: std.Io.Writer = .fixed(buffer);
+    try writer.print("{s}", .{label.name});
+    if (label.seed) |seed| try writer.print(" seed {d}", .{seed});
+    if (label.case) |case| try writer.print(" case {d}", .{case});
+    switch (call) {
+        .load => |expect| try writer.print(
+            ": load {t} via {t}, components {t}, flip {}, expect {t}",
+            .{ request.bits, request.via, o.components, o.flip_vertically, expect },
+        ),
+        .query => |query| try writer.print(": {t} via {t}", .{ query, request.via }),
+        .gif => try writer.print(": gif, components {t}, flip {}", .{
+            o.components, o.flip_vertically,
+        }),
+    }
+    return writer.buffered();
+}
+
+/// The calls of the sanitizer run so far. The labels of hand-made inputs
+/// repeat, so each call is told apart by its number.
+var sanitize_calls: u64 = 0;
+
+/// Prints the `stbi-call:` line that counts a call of the sanitizer run,
+/// and returns the call's number.
+pub fn sanitizeStart(label: []const u8) u64 {
+    sanitize_calls += 1;
+    std.debug.print("stbi-call: #{d} {s}\n", .{ sanitize_calls, label });
+    return sanitize_calls;
+}
+
+/// One call to the original, as a child process of the sanitizer run makes
+/// it. Files are read as callbacks: the original reads both the same way,
+/// and the child needs no descriptors.
+const OriginalCall = struct {
+    bytes: []const u8,
+    request: Request,
+    call: SanitizeCall,
+
+    fn run(original: *const OriginalCall, path: Path) void {
+        const bytes = original.bytes;
+        var settings = original.request.settings();
+        if (original.request.via == .file) settings.via = @backingInt(Via.callbacks);
         var theirs: Result = undefined;
-        switch (call) {
+        switch (original.call) {
             .load => {
-                loadFn(path)(bytes.ptr, bytes.len, bitsArg(request.bits), &settings, &theirs);
+                const bits = bitsArg(original.request.bits);
+                loadFn(path)(bytes.ptr, bytes.len, bits, &settings, &theirs);
                 freeFn(path)(theirs.pixels);
             },
-            .query => |query| _ = queryFn(path)(bytes.ptr, bytes.len, @backingInt(query), &settings, &theirs),
+            .query => |query| {
+                _ = queryFn(path)(bytes.ptr, bytes.len, @backingInt(query), &settings, &theirs);
+            },
             .gif => {
                 loadGifFn(path)(bytes.ptr, bytes.len, &settings, &theirs);
                 freeFn(path)(theirs.pixels);
@@ -877,4 +911,273 @@ fn sanitizedCalls(bytes: []const u8, request: Request, call: SanitizeCall) void 
             },
         }
     }
+};
+
+/// What the port does on a flagged call: "refuses error.X", "accepts" and
+/// the size, or for the yes-or-no queries "answers" and the answer.
+fn portOutcome(
+    gpa: std.mem.Allocator,
+    buffer: []u8,
+    bytes: []const u8,
+    request: Request,
+    call: SanitizeCall,
+) ![]const u8 {
+    const mem_file: ?MemFile = if (request.via == .file)
+        try MemFile.init(bytes, request.file_offset)
+    else
+        null;
+    defer if (mem_file) |m| m.deinit();
+    var file_buffer: [512]u8 = undefined;
+    var file_reader: std.Io.File.Reader = undefined;
+    if (mem_file) |m| {
+        file_reader = m.file().reader(std.testing.io, &file_buffer);
+        try file_reader.seekTo(request.file_offset);
+    }
+    var reader: std.Io.Reader = .fixed(bytes);
+    switch (call) {
+        .load => {
+            var pos_after: u64 = 0;
+            switch (try portLoad(gpa, bytes, request, .{ .mem = mem_file }, &pos_after)) {
+                .image => |image| {
+                    defer freePort(gpa, request.bits, image.owned);
+                    const size = .{ image.x, image.y, image.comp };
+                    return std.fmt.bufPrint(buffer, "accepts {d}x{d}x{d}", size);
+                },
+                .failure => |err| return refusal(buffer, err),
+            }
+        },
+        .query => |query| switch (query) {
+            .info => {
+                const found: anyerror!stbi.Info = switch (request.via) {
+                    .memory => stbi.infoFromMemory(bytes),
+                    .callbacks => stbi.infoFromReader(&reader),
+                    .file => stbi.infoFromFile(&file_reader),
+                    // `expectAll` leaves these out of the sanitizer run.
+                    .path, .file_streaming => unreachable,
+                };
+                const info = found catch |err| return refusal(buffer, err);
+                const size = .{ info.width, info.height, info.channels_in_file };
+                return std.fmt.bufPrint(buffer, "accepts {d}x{d}x{d}", size);
+            },
+            .is_16_bit, .is_hdr => {
+                const found: anyerror!bool = if (query == .is_hdr) switch (request.via) {
+                    .memory => stbi.isHdrFromMemory(bytes),
+                    .callbacks => stbi.isHdrFromReader(&reader),
+                    .file => stbi.isHdrFromFile(&file_reader),
+                    // `expectAll` leaves these out of the sanitizer run.
+                    .path, .file_streaming => unreachable,
+                } else switch (request.via) {
+                    .memory => stbi.is16BitFromMemory(bytes),
+                    .callbacks => stbi.is16BitFromReader(&reader),
+                    .file => stbi.is16BitFromFile(&file_reader),
+                    // `expectAll` leaves these out of the sanitizer run.
+                    .path, .file_streaming => unreachable,
+                };
+                const answer = found catch |err| return refusal(buffer, err);
+                return std.fmt.bufPrint(buffer, "answers {}", .{answer});
+            },
+        },
+        .gif => {
+            var animation = stbi.loadGifFromMemory(gpa, bytes, request.options) catch |err|
+                return refusal(buffer, err);
+            defer animation.deinit(gpa);
+            return std.fmt.bufPrint(buffer, "accepts {d} frames", .{animation.frames});
+        },
+    }
 }
+
+/// "refuses" and the error's name, in `buffer`.
+pub fn refusal(buffer: []u8, err: anyerror) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "refuses {t}", .{err});
+}
+
+/// What a sanitizer reported on one build of the original: the kind of
+/// error, the access for a memory error, and the first frame in the
+/// original, as the library and offset `tools/sanitize.sh` symbolizes; or
+/// how the child ended when it printed no report.
+pub const Report = struct {
+    buffer: [320]u8 = undefined,
+    len: usize = 0,
+
+    pub fn text(report: *const Report) []const u8 {
+        return report.buffer[0..report.len];
+    }
+};
+
+/// The reports of the builds a sanitizer flagged on one call.
+pub const Flags = struct {
+    reports: std.EnumArray(Path, ?Report) = .initFill(null),
+
+    pub fn any(flags: *const Flags) bool {
+        for (flags.reports.values) |report| if (report != null) return true;
+        return false;
+    }
+
+    /// One `stbi-flagged:` line per flagged build: the call's number and
+    /// label, the build, the report and what the port does (`outcome`).
+    pub fn print(flags: *const Flags, number: u64, label: []const u8, outcome: []const u8) void {
+        for (std.enums.values(Path)) |path| {
+            const report = flags.reports.getPtrConst(path).* orelse continue;
+            std.debug.print("stbi-flagged: #{d} {s} | {t} | {s} | port {s}\n", .{
+                number, label, path, report.text(), outcome,
+            });
+        }
+    }
+};
+
+/// The seconds a child may run before it is stopped and counted as
+/// flagged: the original loops for ever on some inputs (a zlib initial
+/// size of 0); every other call takes a small part of that.
+const child_seconds = 20;
+
+/// Runs `call(context, path)` for each of `builds` in a child process with
+/// the sanitizers set to stop at the first report, so a flag ends the child
+/// with a non-zero status, and an overrun cannot corrupt the calls after
+/// it. One child runs every build in turn; after a flag, a new child runs
+/// the builds after the flagged one. Each child's error output comes back
+/// through a pipe, so a report is never paired with another call.
+pub fn runOriginal(
+    comptime Context: type,
+    context: *const Context,
+    comptime call: fn (*const Context, Path) void,
+    builds: []const Path,
+) !Flags {
+    var flags: Flags = .{};
+    var next: usize = 0;
+    while (next < builds.len) {
+        const flag = try runChild(Context, context, call, builds[next..]) orelse break;
+        flags.reports.set(builds[next + flag.index], flag.report);
+        next += flag.index + 1;
+    }
+    return flags;
+}
+
+const ChildFlag = struct {
+    /// Which of the child's builds was flagged.
+    index: usize,
+    report: Report,
+};
+
+/// Written by the child before each build's call, so the parent can tell
+/// which build a report belongs to.
+const build_marker = "stbi-build\n";
+
+fn runChild(
+    comptime Context: type,
+    context: *const Context,
+    comptime call: fn (*const Context, Path) void,
+    builds: []const Path,
+) !?ChildFlag {
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return error.PipeFailed;
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        _ = std.c.close(fds[0]);
+        _ = std.c.dup2(fds[1], std.posix.STDERR_FILENO);
+        _ = std.c.close(fds[1]);
+        _ = std.c.alarm(child_seconds);
+        for (builds) |build| {
+            _ = std.c.write(std.posix.STDERR_FILENO, build_marker, build_marker.len);
+            call(context, build);
+        }
+        std.c._exit(0);
+    }
+    _ = std.c.close(fds[1]);
+    // The report comes first; a long stack trace past the buffer is dropped.
+    var output: [16384]u8 = undefined;
+    var len: usize = 0;
+    var drain: [4096]u8 = undefined;
+    while (true) {
+        const into = if (len < output.len) output[len..] else &drain;
+        const n = std.c.read(fds[0], into.ptr, into.len);
+        if (n <= 0) break;
+        if (len < output.len) len += @intCast(n);
+    }
+    _ = std.c.close(fds[0]);
+    var status: c_int = 0;
+    if (std.c.waitpid(pid, &status, 0) != pid) return error.WaitFailed;
+    const bits: u32 = @bitCast(status);
+    const text = output[0..len];
+    const exited_clean = std.os.linux.W.IFEXITED(bits) and std.os.linux.W.EXITSTATUS(bits) == 0;
+    if (exited_clean and firstLine(text, &report_starts) == null) return null;
+    const markers = std.mem.count(u8, text, build_marker);
+    const index = @min(builds.len, @max(markers, 1)) - 1;
+    const last_marker = std.mem.lastIndexOf(u8, text, build_marker);
+    const after = if (last_marker) |at| text[at + build_marker.len ..] else text;
+    return .{ .index = index, .report = parseReport(after, bits) };
+}
+
+/// The first line of every report kind the sanitizers print.
+const report_starts = [_][]const u8{
+    "ERROR: AddressSanitizer",
+    "runtime error:",
+    "AddressSanitizer: CHECK",
+};
+
+/// The first line of `text` that holds one of `needles`.
+fn firstLine(text: []const u8, needles: []const []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        for (needles) |needle| if (std.mem.indexOf(u8, line, needle) != null) return line;
+    }
+    return null;
+}
+
+/// Shortens a child's output to a `Report`: the report's kind without its
+/// addresses (for UndefinedBehaviorSanitizer, the source position and the
+/// message), the access, and the first frame in the original's library.
+fn parseReport(text: []const u8, status: u32) Report {
+    var report: Report = .{};
+    var writer: std.Io.Writer = .fixed(&report.buffer);
+    // A full buffer only cuts the text short.
+    describeReport(&writer, text, status) catch {};
+    report.len = writer.end;
+    return report;
+}
+
+fn describeReport(writer: *std.Io.Writer, text: []const u8, status: u32) !void {
+    const W = std.os.linux.W;
+    const line = firstLine(text, &report_starts) orelse {
+        if (W.IFSIGNALED(status)) {
+            const signal = W.TERMSIG(status);
+            const what = if (signal == .ALRM) "timed out" else "died";
+            try writer.print("{s}, signal {d}", .{ what, @backingInt(signal) });
+        } else {
+            try writer.print("exited with {d}", .{W.EXITSTATUS(status)});
+        }
+        // Whatever else the child printed, such as a failed assert.
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        const first = lines.next() orelse return writer.print(", no output", .{});
+        return writer.print(": {s}", .{first});
+    };
+    if (std.mem.indexOf(u8, line, "runtime error:")) |at| {
+        // "<dir>/stb_image.h:1234:5: runtime error: ...": the file's own name.
+        const position = line[0..at];
+        const slash = std.mem.lastIndexOfScalar(u8, position, '/');
+        const name = if (slash) |i| position[i + 1 ..] else position;
+        try writer.print("{s}{s}", .{ name, line[at..] });
+    } else {
+        const start = std.mem.indexOf(u8, line, "AddressSanitizer").?;
+        var kind = line[start..];
+        for ([_][]const u8{ " on ", " at ", " (", " \"" }) |cut| {
+            if (std.mem.indexOf(u8, kind, cut)) |at| kind = kind[0..at];
+        }
+        try writer.print("{s}", .{kind});
+        if (firstLine(text, &.{ "READ of size", "WRITE of size" })) |access| {
+            const from = std.mem.indexOf(u8, access, "READ") orelse
+                std.mem.indexOf(u8, access, "WRITE").?;
+            var what = access[from..];
+            if (std.mem.indexOf(u8, what, " at ")) |at| what = what[0..at];
+            try writer.print(", {s}", .{what});
+        }
+    }
+    if (firstLine(text, &.{original_library ++ "+0x"})) |frame| {
+        const at = std.mem.indexOf(u8, frame, original_library).?;
+        const end = std.mem.indexOfScalarPos(u8, frame, at, ')') orelse frame.len;
+        try writer.print(", in {s}", .{frame[at..end]});
+    }
+}
+
+/// The sanitizer build of the original, as `build.zig` names it.
+const original_library = "libstb_image_sanitize.so";

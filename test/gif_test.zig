@@ -5,6 +5,7 @@
 const std = @import("std");
 const stbi = @import("stb_image");
 const oracle = @import("oracle.zig");
+const fuzz_options = @import("fuzz_options");
 const corpus = @import("corpus.zig");
 const fuzz = @import("fuzz.zig");
 
@@ -644,6 +645,11 @@ test "a GIF animation of no pixels and more than one frame is refused" {
         stbi.loadGifFromMemory(gpa, writer.bytes.items, .{}),
     );
     try oracle.expectAllSame(gpa, writer.bytes.items, .{ .name = "no pixels, image" });
+    // Only the sanitizer run, which calls the original in child processes,
+    // can load the animation with the original.
+    if (fuzz_options.sanitize) {
+        try oracle.expectGifSame(gpa, writer.bytes.items, .{}, .{ .name = "no pixels, animation" });
+    }
     // One frame of no pixels is an empty animation, as in the original.
     const one = try makeSimple(0, 3, .{ .w = 0, .h = 0, .indices = &.{} }, 2, 0);
     defer gpa.free(one);
