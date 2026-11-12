@@ -231,6 +231,30 @@ const Decoder = struct {
     /// `stbi__grow_buffer_unsafe`: more than 24 bits in `code_buffer`, or
     /// fewer where a marker ends the data.
     fn growBuffer(z: *Decoder) void {
+        // The bytes the loop below takes, all at once when the source holds
+        // them and none is 0xff. Callers come with at most 23 bits, so the
+        // loop takes one to four bytes, and they fit the 32. A skip from
+        // memory may leave `pos` past `end`, so the test adds to `pos`.
+        const s = z.source;
+        if (!z.nomore and s.pos + 4 <= s.end) {
+            const word = std.mem.readInt(u32, s.base[s.pos..][0..4], .big);
+            const count: u32 = @intCast(@divFloor(24 - z.code_bits, 8) + 1);
+            const bits = count * 8;
+            // The top bit of each 0xff byte (a zero byte of `~word`); a
+            // borrow may also mark the byte before one, which only sends the
+            // bytes the slow way.
+            const inverse = ~word;
+            const marks = (inverse -% 0x01010101) & ~inverse & 0x80808080;
+            const marks_taken = if (count == 4) marks else marks >> @intCast(32 - bits);
+            if (marks_taken == 0) {
+                const taken = if (count == 4) word else word >> @intCast(32 - bits);
+                const free_bits: u32 = 32 - @as(u32, @intCast(z.code_bits));
+                z.code_buffer |= taken << @intCast(free_bits - bits);
+                z.code_bits += @intCast(bits);
+                s.pos += count;
+                return;
+            }
+        }
         while (true) {
             const b: u32 = if (z.nomore) 0 else z.source.get8();
             if (b == 0xff) {

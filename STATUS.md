@@ -84,14 +84,14 @@ performance pass, the skeptic's review, the fixes) are not started.
   whose message gives its benchmark gain; the oracle tests are not edited
   for speed.
 - **Performance: JPEG** (`perf/jpeg`). Time port / original SSE2, best
-  of 3, `zig build bench -- --filter jpeg --rounds 3`: 4:4:4 0.77, 4:2:0
-  0.56, 4:2:0 to rgba 1.02, grey 0.56, progressive 0.93, ycck 0.81. Done:
+  of 3, `zig build bench -- --filter jpeg --rounds 3`: 4:4:4 0.73, 4:2:0
+  0.54, 4:2:0 to rgba 0.99, grey 0.54, progressive 0.94, ycck 0.79. Done:
   the SSE2-mode IDCT on `@Vector` lanes; `-Djpeg-idct` defaults to `sse2`
   on x86-64; `@Vector` YCbCr to RGB/RGBA with the YCCK blend; `@Vector`
-  2x2 (hv_2) upsampling. Tried and dropped: the grey row as a `@memcpy`
-  (no gain). Next: the bit reader's refill several bytes at once (rgba is
-  the one row still above 1: the port's RGBA costs what its RGB does, so
-  the decode itself must get faster), Huffman and per-block overhead, the
+  2x2 (hv_2) upsampling; the bit reader's refill takes up to four bytes at
+  once. Tried and dropped: the grey row as a `@memcpy` (no gain). Next
+  (rgba is the one row near 1: the port's RGBA costs what its RGB does, so
+  the decode itself must get faster): Huffman and per-block overhead, the
   scalar IDCT on vectors where no step can overflow. Resume: measure a
   change with the filtered bench in the same session before and after;
   run `test -Dtest-filter=jpeg` in both `-Djpeg-idct` modes; at the end
