@@ -231,6 +231,30 @@ const Decoder = struct {
     /// `stbi__grow_buffer_unsafe`: more than 24 bits in `code_buffer`, or
     /// fewer where a marker ends the data.
     fn growBuffer(z: *Decoder) void {
+        // The bytes the loop below takes, all at once when the source holds
+        // them and none is 0xff. Callers come with at most 23 bits, so the
+        // loop takes one to four bytes, and they fit the 32. A skip from
+        // memory may leave `pos` past `end`, so the test adds to `pos`.
+        const s = z.source;
+        if (!z.nomore and s.pos + 4 <= s.end) {
+            const word = std.mem.readInt(u32, s.base[s.pos..][0..4], .big);
+            const count: u32 = @intCast(@divFloor(24 - z.code_bits, 8) + 1);
+            const bits = count * 8;
+            // The top bit of each 0xff byte (a zero byte of `~word`); a
+            // borrow may also mark the byte before one, which only sends the
+            // bytes the slow way.
+            const inverse = ~word;
+            const marks = (inverse -% 0x01010101) & ~inverse & 0x80808080;
+            const marks_taken = if (count == 4) marks else marks >> @intCast(32 - bits);
+            if (marks_taken == 0) {
+                const taken = if (count == 4) word else word >> @intCast(32 - bits);
+                const free_bits: u32 = 32 - @as(u32, @intCast(z.code_bits));
+                z.code_buffer |= taken << @intCast(free_bits - bits);
+                z.code_bits += @intCast(bits);
+                s.pos += count;
+                return;
+            }
+        }
         while (true) {
             const b: u32 = if (z.nomore) 0 else z.source.get8();
             if (b == 0xff) {
@@ -342,25 +366,44 @@ const Decoder = struct {
         if (!mul2ShortsValid(dc, dequant[0])) return z.source.fail(error.CannotMergeDcAndAc);
         data[0] = @intCast(dc * dequant[0]);
 
+        // The loop keeps the bit buffer in locals, which a call cannot
+        // change, so they stay in registers; `z` gets them back around each
+        // call and at the end.
+        var buffer = z.code_buffer;
+        var bits = z.code_bits;
         var k: u32 = 1;
         while (true) {
-            if (z.code_bits < 16) z.growBuffer();
-            const c = (z.code_buffer >> (32 - fast_bits)) & fast_mask;
+            if (bits < 16) {
+                z.code_buffer = buffer;
+                z.code_bits = bits;
+                z.growBuffer();
+                buffer = z.code_buffer;
+                bits = z.code_bits;
+            }
+            const c = (buffer >> (32 - fast_bits)) & fast_mask;
             const r: i32 = fac[c];
             if (r != 0) {
                 k += @intCast((r >> 4) & 15);
                 const s = r & 15;
-                if (s > z.code_bits) return z.source.fail(error.JpegBadHuffmanLength);
-                z.code_buffer <<= @intCast(s);
-                z.code_bits -= s;
+                if (s > bits) {
+                    z.code_buffer = buffer;
+                    z.code_bits = bits;
+                    return z.source.fail(error.JpegBadHuffmanLength);
+                }
+                buffer <<= @intCast(s);
+                bits -= s;
                 const zig = dezigzag[k];
                 k += 1;
                 data[zig] = @truncate((r >> 8) * dequant[zig]);
             } else {
+                z.code_buffer = buffer;
+                z.code_bits = bits;
                 const rs = z.huffDecode(hac) orelse return z.source.fail(error.JpegBadHuffmanCode);
                 const s: u5 = @intCast(rs & 15);
                 const run = rs >> 4;
                 if (s == 0) {
+                    buffer = z.code_buffer;
+                    bits = z.code_bits;
                     if (rs != 0xf0) break; // end of block
                     k += 16;
                 } else {
@@ -368,10 +411,14 @@ const Decoder = struct {
                     const zig = dezigzag[k];
                     k += 1;
                     data[zig] = @truncate(z.extendReceive(s) * dequant[zig]);
+                    buffer = z.code_buffer;
+                    bits = z.code_bits;
                 }
             }
             if (k >= 64) break;
         }
+        z.code_buffer = buffer;
+        z.code_bits = bits;
     }
 
     /// `stbi__jpeg_decode_block_prog_dc`: the DC coefficient of a block in
@@ -397,7 +444,7 @@ const Decoder = struct {
             if (!addIntsValid(dc_pred, diff)) return z.source.fail(error.BadJpegDelta);
             const dc = dc_pred + diff;
             z.components[b].dc_pred = dc;
-            const scale = @as(i32, 1) << @intCast(z.succ_low);
+            const scale = @as(u16, 1) << @intCast(z.succ_low);
             if (!mul2ShortsValid(dc, scale)) return z.source.fail(error.CannotMergeDcAndAc);
             data[0] = @intCast(dc * scale);
         } else {
@@ -1074,7 +1121,7 @@ fn convertRow(
                     if (n == 4) o[3] = 255;
                 }
             } else {
-                ycbcrToRgbRow(out, y, coutput[1], coutput[2], n);
+                ycbcrToRgbRow(out, y, coutput[1], coutput[2], null, n);
             }
         } else if (img_n == 4) {
             if (transform == 0) {
@@ -1089,17 +1136,10 @@ fn convertRow(
                 }
             } else if (transform == 2) {
                 // YCCK
-                ycbcrToRgbRow(out, y, coutput[1], coutput[2], n);
-                for (0..x) |i| {
-                    const m = coutput[3][i];
-                    const o = out[i * n ..][0..3];
-                    o[0] = blinn8x8(255 - o[0], m);
-                    o[1] = blinn8x8(255 - o[1], m);
-                    o[2] = blinn8x8(255 - o[2], m);
-                }
+                ycbcrToRgbRow(out, y, coutput[1], coutput[2], coutput[3], n);
             } else {
                 // YCbCr, the fourth component left out.
-                ycbcrToRgbRow(out, y, coutput[1], coutput[2], n);
+                ycbcrToRgbRow(out, y, coutput[1], coutput[2], null, n);
             }
         } else {
             for (0..x) |i| {
@@ -1206,9 +1246,21 @@ fn resampleRowHv2(out: []u8, in_near: []const u8, in_far: []const u8) void {
         out[1] = value;
         return;
     }
-    var t1 = 3 * @as(u32, in_near[0]) + in_far[0];
-    out[0] = div4(t1 + 2);
-    for (1..w) |i| {
+    out[0] = div4(3 * @as(u32, in_near[0]) + in_far[0] + 2);
+    // Output samples 2i - 1 and 2i blend the vertical sums at i - 1 and i;
+    // `lanes` input samples at a time, all within 16 bits.
+    var i: usize = 1;
+    while (i + lanes <= w) : (i += lanes) {
+        const before = verticalSums(in_near[i - 1 ..][0..lanes].*, in_far[i - 1 ..][0..lanes].*);
+        const here = verticalSums(in_near[i..][0..lanes].*, in_far[i..][0..lanes].*);
+        const three: U16xN = @splat(3);
+        const eight: U16xN = @splat(8);
+        const left: U8xN = @intCast((three * before + here + eight) >> @splat(4));
+        const right: U8xN = @intCast((three * here + before + eight) >> @splat(4));
+        out[2 * i - 1 ..][0 .. 2 * lanes].* = @shuffle(u8, left, right, zip(lanes, 1, 1, 0));
+    }
+    var t1 = 3 * @as(u32, in_near[i - 1]) + in_far[i - 1];
+    while (i < w) : (i += 1) {
         const t0 = t1;
         t1 = 3 * @as(u32, in_near[i]) + in_far[i];
         out[i * 2 - 1] = div16(3 * t0 + t1 + 8);
@@ -1217,34 +1269,136 @@ fn resampleRowHv2(out: []u8, in_near: []const u8, in_far: []const u8) void {
     out[w * 2 - 1] = div4(t1 + 2);
 }
 
+/// Three parts the nearer row and one part the farther.
+fn verticalSums(near: U8xN, far: U8xN) U16xN {
+    const three: U16xN = @splat(3);
+    return three * @as(U16xN, near) + @as(U16xN, far);
+}
+
 /// `stbi__resample_row_generic`: each input sample repeated `hs` times;
 /// the rows repeat too.
 fn resampleRowGeneric(out: []u8, in_near: []const u8, hs: u32) void {
     for (in_near, 0..) |sample, i| @memset(out[i * hs ..][0..hs], sample);
 }
 
+/// A `@shuffle` mask of `groups` groups of lanes, each `from_a` lanes of
+/// the first vector and then `from_b` of the second, starting at group
+/// `first` of each.
+fn zip(
+    comptime groups: usize,
+    comptime from_a: usize,
+    comptime from_b: usize,
+    comptime first: usize,
+) @Vector(groups * (from_a + from_b), i32) {
+    var mask: [groups * (from_a + from_b)]i32 = undefined;
+    for (0..groups) |j| {
+        const group = mask[j * (from_a + from_b) ..][0 .. from_a + from_b];
+        for (group[0..from_a], 0..) |*lane, t| lane.* = @intCast((first + j) * from_a + t);
+        for (group[from_a..], 0..) |*lane, t| {
+            lane.* = ~@as(i32, @intCast((first + j) * from_b + t));
+        }
+    }
+    return mask;
+}
+
 fn float2fixed(comptime x: f32) i32 {
     return @as(i32, @intFromFloat(x * 4096.0 + 0.5)) << 8;
 }
 
+/// Samples converted at once by the vector colour conversion and
+/// upsampling.
+const lanes = 16;
+const U8xN = @Vector(lanes, u8);
+const U16xN = @Vector(lanes, u16);
+const I32xN = @Vector(lanes, i32);
+
 /// `stbi__YCbCr_to_RGB_row`: a reduced-precision conversion, the one the
-/// original's SIMD paths also compute.
-fn ycbcrToRgbRow(out: []u8, y: []const u8, pcb: []const u8, pcr: []const u8, step: u32) void {
-    const high_half: i32 = @bitCast(@as(u32, 0xffff0000));
-    for (y, pcb, pcr, 0..) |luma, blue, red, i| {
-        const y_fixed = (@as(i32, luma) << 20) + (1 << 19); // rounding
-        const cr = @as(i32, red) - 128;
-        const cb = @as(i32, blue) - 128;
-        const cb_green = (cb * -float2fixed(0.34414)) & high_half;
-        const r = (y_fixed + cr * float2fixed(1.40200)) >> 20;
-        const g = (y_fixed + cr * -float2fixed(0.71414) + cb_green) >> 20;
-        const b = (y_fixed + cb * float2fixed(1.77200)) >> 20;
-        const o = out[i * step ..][0..step];
-        o[0] = @intCast(std.math.clamp(r, 0, 255));
-        o[1] = @intCast(std.math.clamp(g, 0, 255));
-        o[2] = @intCast(std.math.clamp(b, 0, 255));
-        if (step == 4) o[3] = 255;
+/// original's SIMD paths also compute, into `step` (3 or 4) bytes a pixel.
+/// With `black`, YCCK: each colour channel `c` then becomes
+/// `blinn8x8(255 - c, k)`, as the original does after converting.
+fn ycbcrToRgbRow(
+    out: []u8,
+    y: []const u8,
+    pcb: []const u8,
+    pcr: []const u8,
+    black: ?[]const u8,
+    step: u32,
+) void {
+    switch (step) {
+        3 => ycbcrToRgb(3, out, y, pcb, pcr, black),
+        4 => ycbcrToRgb(4, out, y, pcb, pcr, black),
+        else => unreachable,
     }
+}
+
+fn ycbcrToRgb(
+    comptime step: usize,
+    out: []u8,
+    y: []const u8,
+    pcb: []const u8,
+    pcr: []const u8,
+    black: ?[]const u8,
+) void {
+    var i: usize = 0;
+    while (i + lanes <= y.len) : (i += lanes) {
+        const luma = y[i..][0..lanes].*;
+        const k: ?U8xN = if (black) |b| b[i..][0..lanes].* else null;
+        const pixels = ycbcrPixels(step, luma, pcb[i..][0..lanes].*, pcr[i..][0..lanes].*, k);
+        out[i * step ..][0 .. lanes * step].* = pixels;
+    }
+    // The last few pixels, through zero-filled copies.
+    const rest = y.len - i;
+    if (rest == 0) return;
+    var parts: [4][lanes]u8 = @splat(@splat(0));
+    for (&parts, [_][]const u8{ y, pcb, pcr, black orelse y }) |*part, samples| {
+        @memcpy(part[0..rest], samples[i..]);
+    }
+    const k: ?U8xN = if (black != null) parts[3] else null;
+    const pixels = ycbcrPixels(step, parts[0], parts[1], parts[2], k);
+    @memcpy(out[i * step ..][0 .. rest * step], pixels[0 .. rest * step]);
+}
+
+/// `lanes` pixels' colour, interleaved; the alpha of RGBA is 255.
+fn ycbcrPixels(
+    comptime step: usize,
+    luma: U8xN,
+    blue: U8xN,
+    red: U8xN,
+    black: ?U8xN,
+) [lanes * step]u8 {
+    const splat = struct {
+        fn f(x: i32) I32xN {
+            return @splat(x);
+        }
+    }.f;
+    const y_fixed = (@as(I32xN, luma) << @splat(20)) + splat(1 << 19); // rounding
+    const cr = @as(I32xN, red) - splat(128);
+    const cb = @as(I32xN, blue) - splat(128);
+    const high_half: i32 = @bitCast(@as(u32, 0xffff0000));
+    const cb_green = (cb * splat(-float2fixed(0.34414))) & splat(high_half);
+    const r = (y_fixed + cr * splat(float2fixed(1.40200))) >> @splat(20);
+    const g = (y_fixed + cr * splat(-float2fixed(0.71414)) + cb_green) >> @splat(20);
+    const b = (y_fixed + cb * splat(float2fixed(1.77200))) >> @splat(20);
+    const clamp = struct {
+        fn f(x: I32xN) U8xN {
+            return @intCast(@min(@max(x, splat(0)), splat(255)));
+        }
+    }.f;
+    var channels: [3]U8xN = .{ clamp(r), clamp(g), clamp(b) };
+    if (black) |k| {
+        for (&channels) |*c| c.* = blinn8x8Lanes(@as(U8xN, @splat(255)) - c.*, k);
+    }
+    const rg = @shuffle(u8, channels[0], channels[1], zip(lanes, 1, 1, 0));
+    if (step == 3) return @shuffle(u8, rg, channels[2], zip(lanes, 2, 1, 0));
+    const alpha: U8xN = @splat(255);
+    const ba = @shuffle(u8, channels[2], alpha, zip(lanes, 1, 1, 0));
+    return @shuffle(u8, rg, ba, zip(lanes, 2, 2, 0));
+}
+
+/// `blinn8x8` on each lane; every step fits 16 bits.
+fn blinn8x8Lanes(x: U8xN, y: U8xN) U8xN {
+    const t = @as(U16xN, x) * @as(U16xN, y) + @as(U16xN, @splat(128));
+    return @intCast((t + (t >> @splat(8))) >> @splat(8));
 }
 
 /// `stbi__blinn_8x8`: `x * y / 255`, rounded.
@@ -1270,15 +1424,12 @@ fn addIntsValid(a: i32, b: i32) bool {
     return a <= std.math.maxInt(i32) - b;
 }
 
-/// `stbi__mul2shorts_valid`: whether `a * b` fits a `short`, with C's
-/// division.
-fn mul2ShortsValid(a: i32, b: i32) bool {
-    const short_max = std.math.maxInt(i16);
-    const short_min = std.math.minInt(i16);
-    if (b == 0 or b == -1) return true;
-    if ((a >= 0) == (b >= 0)) return a <= @divTrunc(short_max, b);
-    if (b < 0) return a <= @divTrunc(short_min, b);
-    return a >= @divTrunc(short_min, b);
+/// `stbi__mul2shorts_valid`: whether `a * b` fits a `short`. The original
+/// tests it by dividing; for a `b` that is not negative, as every quantizer
+/// and power of two it is given is, the product test is the same.
+fn mul2ShortsValid(a: i32, b: u16) bool {
+    const product = @as(i64, a) * b;
+    return product >= std.math.minInt(i16) and product <= std.math.maxInt(i16);
 }
 
 /// `(1 << n) - 1`.
@@ -1395,6 +1546,27 @@ const Plain = struct {
     }
 };
 
+/// `Plain` on eight lanes at once.
+const Lanes = struct {
+    const Num = I32x8;
+
+    inline fn add(_: *Lanes, x: I32x8, y: I32x8) I32x8 {
+        return x + y;
+    }
+    inline fn sub(_: *Lanes, x: I32x8, y: I32x8) I32x8 {
+        return x - y;
+    }
+    inline fn mul(_: *Lanes, x: I32x8, comptime c: i32) I32x8 {
+        return x * @as(I32x8, @splat(c));
+    }
+    inline fn shr(_: *Lanes, x: I32x8, comptime shift: u5) I32x8 {
+        return x >> @splat(shift);
+    }
+    inline fn constant(_: *Lanes, comptime c: i32) I32x8 {
+        return @splat(c);
+    }
+};
+
 const Checked = struct {
     const Num = i64;
     overflow: bool = false,
@@ -1502,6 +1674,34 @@ fn idctPass(
 /// coefficients, into `out` with rows `out_stride` apart. Fails where the
 /// original's `int` arithmetic overflows.
 fn idctBlock(out: []u8, out_stride: usize, data: *const [64]i16) error{Overflow}!void {
+    // Where no step of either pass can overflow, eight columns (then rows)
+    // at once: the same arithmetic as below, where a column with only its DC
+    // term also gives `4 * dc` eight times.
+    const coefficients: @Vector(64, i16) = data.*;
+    if (@reduce(.Max, @abs(coefficients)) <= column_input_max) {
+        var a: Lanes = .{};
+        var rows: [8]I32x8 = undefined;
+        for (&rows, 0..) |*row, i| row.* = @as(I16x8, data[i * 8 ..][0..8].*);
+        const columns = idct1d(Lanes, &a, rows, column_bias, column_shift);
+        var peak: @Vector(8, u32) = @splat(0);
+        for (columns) |column| peak = @max(peak, @abs(column));
+        if (@reduce(.Max, peak) <= row_input_max) {
+            const transformed = idct1d(Lanes, &a, transpose(i32, columns), row_bias, row_shift);
+            const zero: I32x8 = @splat(0);
+            const max: I32x8 = @splat(255);
+            for (transpose(i32, transformed), 0..) |row, i| {
+                const bytes: @Vector(8, u8) = @intCast(@min(@max(row, zero), max));
+                out[i * out_stride ..][0..8].* = bytes;
+            }
+            return;
+        }
+    }
+    return idctBlockByColumns(out, out_stride, data);
+}
+
+/// `idctBlock` one column, then one row, at a time, each by the
+/// arithmetic its values need.
+fn idctBlockByColumns(out: []u8, out_stride: usize, data: *const [64]i16) error{Overflow}!void {
     var val: [64]i32 = undefined;
     for (0..8) |i| {
         var column: [8]i32 = undefined;
@@ -1520,26 +1720,45 @@ fn idctBlock(out: []u8, out_stride: usize, data: *const [64]i16) error{Overflow}
     }
 }
 
-/// One pass of `stbi__idct_simd`, the original's SSE2 IDCT, lane by lane:
-/// the scalar pass's arithmetic regrouped, with sums of inputs in 16 bits,
-/// products and sums in 32 bits, all wrapping, and the results saturated
-/// to 16 bits.
-fn idct1dSse2(s: [8]i16, comptime bias: i32, comptime shift: u5) [8]i16 {
+/// Eight 16-bit values, one per column (or row) of a block.
+const I16x8 = @Vector(8, i16);
+const I32x8 = @Vector(8, i32);
+
+/// One pass of `stbi__idct_simd`, the original's SSE2 IDCT, over eight
+/// columns at once (lane `i` is column `i`): the scalar pass's arithmetic
+/// regrouped, with sums of inputs in 16 bits, products and sums in 32 bits,
+/// all wrapping, and the results saturated to 16 bits.
+fn idctPassSse2(s: [8]I16x8, comptime bias: i32, comptime shift: u5) [8]I16x8 {
     const a = comptime f2f(0.5411961);
     const d = comptime f2f(1.175875602);
     const k = comptime f2f(-1.961570560);
     const l = comptime f2f(-0.390180644);
-    // `_mm_madd_epi16`: two 16-bit products summed.
-    const rot = struct {
-        fn f(x: i16, y: i16, comptime cx: i16, comptime cy: i16) i32 {
-            return @as(i32, x) * cx +% @as(i32, y) * cy;
+    const ops = struct {
+        fn widen(x: I16x8) I32x8 {
+            return x;
         }
-    }.f;
+        // `_mm_madd_epi16`: two 16-bit products summed. No product of a
+        // 16-bit value and these constants (below 2^13) overflows.
+        fn rot(x: I16x8, y: I16x8, comptime cx: i32, comptime cy: i32) I32x8 {
+            const vx: I32x8 = @splat(cx);
+            const vy: I32x8 = @splat(cy);
+            return widen(x) * vx +% widen(y) * vy;
+        }
+        // `_mm_packs_epi32` saturates.
+        fn pack(x: I32x8) I16x8 {
+            const low: I32x8 = @splat(std.math.minInt(i16));
+            const high: I32x8 = @splat(std.math.maxInt(i16));
+            return @truncate(@min(@max(x >> @splat(shift), low), high));
+        }
+    };
+    const rot = ops.rot;
+    const pack = ops.pack;
+    const scale: I32x8 = @splat(4096);
     // Even part.
     const t2e = rot(s[2], s[6], a, a + f2f(-1.847759065));
     const t3e = rot(s[2], s[6], a + f2f(0.765366865), a);
-    const t0e = @as(i32, s[0] +% s[4]) * 4096;
-    const t1e = @as(i32, s[0] -% s[4]) * 4096;
+    const t0e = ops.widen(s[0] +% s[4]) * scale;
+    const t1e = ops.widen(s[0] -% s[4]) * scale;
     const x0 = t0e +% t3e;
     const x3 = t0e -% t3e;
     const x1 = t1e +% t2e;
@@ -1557,38 +1776,53 @@ fn idct1dSse2(s: [8]i16, comptime bias: i32, comptime shift: u5) [8]i16 {
     const x5 = y1o +% y5o;
     const x6 = y2o +% y5o;
     const x7 = y3o +% y4o;
-    // `_mm_packs_epi32` saturates.
-    const pack = struct {
-        fn f(x: i32) i16 {
-            return @intCast(std.math.clamp(x >> shift, std.math.minInt(i16), std.math.maxInt(i16)));
-        }
-    }.f;
+    const b: I32x8 = @splat(bias);
     return .{
-        pack(x0 +% bias +% x7),
-        pack(x1 +% bias +% x6),
-        pack(x2 +% bias +% x5),
-        pack(x3 +% bias +% x4),
-        pack(x3 +% bias -% x4),
-        pack(x2 +% bias -% x5),
-        pack(x1 +% bias -% x6),
-        pack(x0 +% bias -% x7),
+        pack(x0 +% b +% x7),
+        pack(x1 +% b +% x6),
+        pack(x2 +% b +% x5),
+        pack(x3 +% b +% x4),
+        pack(x3 +% b -% x4),
+        pack(x2 +% b -% x5),
+        pack(x1 +% b -% x6),
+        pack(x0 +% b -% x7),
     };
+}
+
+/// The 8 by 8 transpose of `rows`, by three rounds of interleaving pairs.
+fn transpose(comptime T: type, rows: [8]@Vector(8, T)) [8]@Vector(8, T) {
+    // `_mm_unpacklo_epi16` and `_mm_unpackhi_epi16`: lanes taken in turn
+    // from the low or high halves of `x` and `y` (`~i` is `y`'s lane `i`).
+    const low = comptime zip(4, 1, 1, 0);
+    const high = comptime zip(4, 1, 1, 4);
+    var r = rows;
+    inline for ([_][4][2]usize{
+        .{ .{ 0, 4 }, .{ 1, 5 }, .{ 2, 6 }, .{ 3, 7 } },
+        .{ .{ 0, 2 }, .{ 1, 3 }, .{ 4, 6 }, .{ 5, 7 } },
+        .{ .{ 0, 1 }, .{ 2, 3 }, .{ 4, 5 }, .{ 6, 7 } },
+    }) |round| {
+        inline for (round) |pair| {
+            const x = r[pair[0]];
+            const y = r[pair[1]];
+            r[pair[0]] = @shuffle(T, x, y, low);
+            r[pair[1]] = @shuffle(T, x, y, high);
+        }
+    }
+    return r;
 }
 
 /// `stbi__idct_simd`: the block's samples as the original's SSE2 build
 /// computes them. Defined for every input.
 fn idctBlockSse2(out: []u8, out_stride: usize, data: *const [64]i16) void {
-    var val: [64]i16 = undefined;
-    for (0..8) |i| {
-        var column: [8]i16 = undefined;
-        for (&column, 0..) |*value, row| value.* = data[row * 8 + i];
-        const result = idct1dSse2(column, column_bias, column_shift);
-        for (result, 0..) |value, row| val[row * 8 + i] = value;
-    }
-    for (0..8) |row| {
-        const result = idct1dSse2(val[row * 8 ..][0..8].*, row_bias, row_shift);
-        const o = out[row * out_stride ..][0..8];
-        for (o, result) |*sample, value| sample.* = @intCast(std.math.clamp(value, 0, 255));
+    var rows: [8]I16x8 = undefined;
+    for (&rows, 0..) |*row, i| row.* = data[i * 8 ..][0..8].*;
+    const columns = idctPassSse2(rows, column_bias, column_shift);
+    const samples = transpose(i16, idctPassSse2(transpose(i16, columns), row_bias, row_shift));
+    const zero: I16x8 = @splat(0);
+    const max: I16x8 = @splat(255);
+    for (samples, 0..) |row, i| {
+        const bytes: @Vector(8, u8) = @intCast(@min(@max(row, zero), max));
+        out[i * out_stride ..][0..8].* = bytes;
     }
 }
 
@@ -1629,4 +1863,247 @@ pub fn info(source: *Source) ?common.Info {
         .height = source.img_y,
         .channels_in_file = if (source.img_n >= 3) 3 else 1,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// The SSE2 IDCT one lane at a time, as the C intrinsics define each lane:
+/// the reference for `idctBlockSse2`'s vector code.
+fn idctBlockSse2Lanes(out: []u8, out_stride: usize, data: *const [64]i16) void {
+    const pass = struct {
+        fn rot(x: i16, y: i16, comptime cx: i32, comptime cy: i32) i32 {
+            return @as(i32, x) * cx +% @as(i32, y) * cy;
+        }
+        fn pack(x: i32, comptime shift: u5) i16 {
+            return @intCast(std.math.clamp(x >> shift, std.math.minInt(i16), std.math.maxInt(i16)));
+        }
+        fn f(s: [8]i16, comptime bias: i32, comptime shift: u5) [8]i16 {
+            const a = comptime f2f(0.5411961);
+            const d = comptime f2f(1.175875602);
+            const k = comptime f2f(-1.961570560);
+            const l = comptime f2f(-0.390180644);
+            const t2e = rot(s[2], s[6], a, a + f2f(-1.847759065));
+            const t3e = rot(s[2], s[6], a + f2f(0.765366865), a);
+            const t0e = @as(i32, s[0] +% s[4]) * 4096;
+            const t1e = @as(i32, s[0] -% s[4]) * 4096;
+            const x0 = t0e +% t3e;
+            const x3 = t0e -% t3e;
+            const x1 = t1e +% t2e;
+            const x2 = t1e -% t2e;
+            const y0o = rot(s[7], s[3], k + f2f(0.298631336), k);
+            const y2o = rot(s[7], s[3], k, k + f2f(3.072711026));
+            const y1o = rot(s[5], s[1], l + f2f(2.053119869), l);
+            const y3o = rot(s[5], s[1], l, l + f2f(1.501321110));
+            const sum17 = s[1] +% s[7];
+            const sum35 = s[3] +% s[5];
+            const y4o = rot(sum17, sum35, d + f2f(-0.899976223), d);
+            const y5o = rot(sum17, sum35, d, d + f2f(-2.562915447));
+            const x4 = y0o +% y4o;
+            const x5 = y1o +% y5o;
+            const x6 = y2o +% y5o;
+            const x7 = y3o +% y4o;
+            return .{
+                pack(x0 +% bias +% x7, shift),
+                pack(x1 +% bias +% x6, shift),
+                pack(x2 +% bias +% x5, shift),
+                pack(x3 +% bias +% x4, shift),
+                pack(x3 +% bias -% x4, shift),
+                pack(x2 +% bias -% x5, shift),
+                pack(x1 +% bias -% x6, shift),
+                pack(x0 +% bias -% x7, shift),
+            };
+        }
+    }.f;
+    var val: [64]i16 = undefined;
+    for (0..8) |i| {
+        var column: [8]i16 = undefined;
+        for (&column, 0..) |*value, row| value.* = data[row * 8 + i];
+        const result = pass(column, column_bias, column_shift);
+        for (result, 0..) |value, row| val[row * 8 + i] = value;
+    }
+    for (0..8) |row| {
+        const result = pass(val[row * 8 ..][0..8].*, row_bias, row_shift);
+        const o = out[row * out_stride ..][0..8];
+        for (o, result) |*sample, value| sample.* = @intCast(std.math.clamp(value, 0, 255));
+    }
+}
+
+test "the vector SSE2 IDCT gives the samples of the SSE2 IDCT computed lane by lane" {
+    var prng: std.Random.DefaultPrng = .init(0x1dc7);
+    const random = prng.random();
+    for (0..200_000) |case| {
+        var data: [64]i16 = undefined;
+        // Full-range values, values of real images' size, and sparse blocks.
+        const magnitude: i16 = switch (case % 4) {
+            0 => std.math.maxInt(i16),
+            1 => 2048,
+            else => 300,
+        };
+        for (&data) |*d| {
+            d.* = random.intRangeAtMost(i16, -magnitude, magnitude);
+            if (case % 4 == 3 and random.uintLessThan(u8, 8) != 0) d.* = 0;
+        }
+        if (case < 64) data = @splat(if (case % 2 == 0) std.math.minInt(i16) else 0);
+        if (case < 64) data[case] = std.math.maxInt(i16);
+        var expected: [8 * 11]u8 = @splat(0xaa);
+        var actual: [8 * 11]u8 = @splat(0xaa);
+        idctBlockSse2Lanes(&expected, 11, &data);
+        idctBlockSse2(&actual, 11, &data);
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
+}
+
+/// `stbi__YCbCr_to_RGB_row` one pixel at a time: the reference for
+/// `ycbcrToRgbRow`'s vector code.
+fn ycbcrToRgbPixel(out: []u8, luma: u8, blue: u8, red: u8) void {
+    const high_half: i32 = @bitCast(@as(u32, 0xffff0000));
+    const y_fixed = (@as(i32, luma) << 20) + (1 << 19);
+    const cr = @as(i32, red) - 128;
+    const cb = @as(i32, blue) - 128;
+    const cb_green = (cb * -float2fixed(0.34414)) & high_half;
+    const r = (y_fixed + cr * float2fixed(1.40200)) >> 20;
+    const g = (y_fixed + cr * -float2fixed(0.71414) + cb_green) >> 20;
+    const b = (y_fixed + cb * float2fixed(1.77200)) >> 20;
+    out[0] = @intCast(std.math.clamp(r, 0, 255));
+    out[1] = @intCast(std.math.clamp(g, 0, 255));
+    out[2] = @intCast(std.math.clamp(b, 0, 255));
+    if (out.len == 4) out[3] = 255;
+}
+
+test "the vector YCbCr and YCCK conversion gives the bytes of the scalar one for every colour" {
+    var luma: [256 + 9]u8 = undefined;
+    for (&luma, 0..) |*y, i| y.* = @truncate(i * 7);
+    var blue: [luma.len]u8 = undefined;
+    var red: [luma.len]u8 = undefined;
+    var black: [luma.len]u8 = undefined;
+    var expected: [luma.len * 4]u8 = undefined;
+    var actual: [luma.len * 4 + 1]u8 = undefined;
+    for (0..256) |cb| {
+        for (0..256) |cr| {
+            // Each row has every luma; its length leaves a part vector.
+            const len = 256 + (cb + cr) % 10;
+            @memset(blue[0..len], @intCast(cb));
+            @memset(red[0..len], @intCast(cr));
+            for (black[0..len], 0..) |*k, i| k.* = @truncate(cb * 3 + cr * 5 + i);
+            for ([_]u32{ 3, 4 }) |step| {
+                const size = len * step;
+                for ([_]?[]const u8{ null, black[0..len] }) |ycck| {
+                    for (0..len) |i| {
+                        const o = expected[i * step ..][0..step];
+                        ycbcrToRgbPixel(o, luma[i], blue[i], red[i]);
+                        if (ycck) |k| {
+                            for (o[0..3]) |*c| c.* = blinn8x8(255 - c.*, k[i]);
+                        }
+                    }
+                    actual[size] = 0xaa;
+                    const in = .{ luma[0..len], blue[0..len], red[0..len] };
+                    ycbcrToRgbRow(actual[0..size], in[0], in[1], in[2], ycck, step);
+                    try std.testing.expectEqualSlices(u8, expected[0..size], actual[0..size]);
+                    try std.testing.expectEqual(0xaa, actual[size]);
+                }
+            }
+        }
+    }
+}
+
+/// `stbi__resample_row_hv_2` one sample at a time: the reference for
+/// `resampleRowHv2`'s vector code.
+fn resampleRowHv2Samples(out: []u8, in_near: []const u8, in_far: []const u8) void {
+    const w = in_near.len;
+    if (w == 1) {
+        const value = div4(3 * @as(u32, in_near[0]) + in_far[0] + 2);
+        out[0] = value;
+        out[1] = value;
+        return;
+    }
+    var t1 = 3 * @as(u32, in_near[0]) + in_far[0];
+    out[0] = div4(t1 + 2);
+    for (1..w) |i| {
+        const t0 = t1;
+        t1 = 3 * @as(u32, in_near[i]) + in_far[i];
+        out[i * 2 - 1] = div16(3 * t0 + t1 + 8);
+        out[i * 2] = div16(3 * t1 + t0 + 8);
+    }
+    out[w * 2 - 1] = div4(t1 + 2);
+}
+
+test "the vector 2 by 2 upsampling gives the bytes of the scalar one" {
+    var prng: std.Random.DefaultPrng = .init(0x2a2);
+    const random = prng.random();
+    var near: [100]u8 = undefined;
+    var far: [100]u8 = undefined;
+    var expected: [2 * near.len + 1]u8 = undefined;
+    var actual: [2 * near.len + 1]u8 = undefined;
+    for (0..20_000) |case| {
+        const w = 1 + case % near.len;
+        for (near[0..w], far[0..w]) |*n, *f| {
+            // Extremes often, to reach the largest sums.
+            n.* = if (random.boolean()) random.int(u8) else if (random.boolean()) 255 else 0;
+            f.* = if (random.boolean()) random.int(u8) else if (random.boolean()) 255 else 0;
+        }
+        expected[2 * w] = 0xaa;
+        actual[2 * w] = 0xaa;
+        resampleRowHv2Samples(&expected, near[0..w], far[0..w]);
+        resampleRowHv2(&actual, near[0..w], far[0..w]);
+        try std.testing.expectEqualSlices(u8, expected[0 .. 2 * w + 1], actual[0 .. 2 * w + 1]);
+    }
+}
+
+test "the product test of `mul2ShortsValid` agrees with the original's division" {
+    const division = struct {
+        fn f(a: i32, b: i32) bool {
+            const short_max = std.math.maxInt(i16);
+            const short_min = std.math.minInt(i16);
+            if (b == 0 or b == -1) return true;
+            if ((a >= 0) == (b >= 0)) return a <= @divTrunc(short_max, b);
+            if (b < 0) return a <= @divTrunc(short_min, b);
+            return a >= @divTrunc(short_min, b);
+        }
+    }.f;
+    for (0..std.math.maxInt(u16) + 1) |wide| {
+        const b: u16 = @intCast(wide);
+        // Around each side's limit, and the ends of an `int`.
+        const divisor: i32 = @max(b, 1);
+        const limits = [_]i32{
+            0,
+            @divTrunc(std.math.maxInt(i16), divisor),
+            @divTrunc(std.math.minInt(i16), divisor),
+        };
+        for (limits) |limit| {
+            var a = limit -| 2;
+            while (a <= limit +| 2) : (a += 1) {
+                try std.testing.expectEqual(division(a, b), mul2ShortsValid(a, b));
+            }
+        }
+        for ([_]i32{ std.math.minInt(i32), std.math.maxInt(i32) }) |a| {
+            try std.testing.expectEqual(division(a, b), mul2ShortsValid(a, b));
+        }
+    }
+}
+
+test "the scalar IDCT on lanes gives the samples of the scalar IDCT by columns" {
+    var prng: std.Random.DefaultPrng = .init(0x5ca1);
+    const random = prng.random();
+    for (0..200_000) |case| {
+        var data: [64]i16 = undefined;
+        // Up to the lanes' limit and past it, and sparse blocks.
+        const magnitude: i16 = switch (case % 4) {
+            0 => column_input_max,
+            1 => std.math.maxInt(i16),
+            2 => 2048,
+            else => 300,
+        };
+        for (&data) |*d| {
+            d.* = random.intRangeAtMost(i16, -magnitude, magnitude);
+            if (case % 2 == 1 and random.uintLessThan(u8, 4) != 0) d.* = 0;
+        }
+        var expected: [8 * 11]u8 = @splat(0xaa);
+        var actual: [8 * 11]u8 = @splat(0xaa);
+        const expected_result = idctBlockByColumns(&expected, 11, &data);
+        const actual_result = idctBlock(&actual, 11, &data);
+        try std.testing.expectEqual(expected_result, actual_result);
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+    }
 }

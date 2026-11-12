@@ -100,8 +100,8 @@ each call:
 Every load is compared with both builds. Where the two builds give
 different pixels (JPEG coefficients past 16 bits, where the SSE2 IDCT
 saturates and the scalar one wraps), the port is compared with the build it
-follows, the scalar one unless `-Djpeg-idct=sse2`; the JPEG tests run in
-both modes. With fused multiply-adds off, float steps round as written, as
+follows, the SSE2 one on x86-64 and the scalar one elsewhere unless
+`-Djpeg-idct` says otherwise; the JPEG tests run in both modes. With fused multiply-adds off, float steps round as written, as
 Zig's do. The original calls the C library's `pow`; the port carries
 glibc 2.44's, which on this machine is the one the original calls
 ([`parity.md`](parity.md) has the detail).

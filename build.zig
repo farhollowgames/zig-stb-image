@@ -15,11 +15,14 @@ pub fn build(b: *std.Build) void {
         const enabled = b.option(bool, name, "Decode " ++ name ++ " (default true)") orelse true;
         format_options.addOption(bool, name, enabled);
     }
+    // The original builds its SSE2 IDCT for x86-64 and its scalar one for
+    // targets without SSE2.
     const jpeg_idct = b.option(
         JpegIdct,
         "jpeg-idct",
-        "The JPEG IDCT whose samples to give where the original's builds differ (default scalar)",
-    ) orelse .scalar;
+        "The JPEG IDCT whose samples to give where the original's builds differ " ++
+            "(default sse2 on x86-64, else scalar)",
+    ) orelse if (target.result.cpu.arch == .x86_64) JpegIdct.sse2 else .scalar;
     format_options.addOption(JpegIdct, "jpeg_idct", jpeg_idct);
     const format_module = format_options.createModule();
 
