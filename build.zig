@@ -183,10 +183,11 @@ fn differentialTest(
 
 /// `zig build sanitize`: every test's calls to the original, through the
 /// original built by the system clang with AddressSanitizer and
-/// UndefinedBehaviorSanitizer (recovering, so one run reports every case),
-/// and a report of the calls a sanitizer flagged in
-/// zig-out/sanitize/report.txt, with the full log beside it. The port is
-/// not run. Needs clang with its sanitizer runtimes on the PATH.
+/// UndefinedBehaviorSanitizer, each call in child processes that stop at
+/// the first report. For every flagged call the port runs on the same
+/// input and request; zig-out/sanitize/<filters>/ gets the flagged calls
+/// (report.txt), those the port accepts (accepted.txt), the counts and the
+/// full log. Needs clang with its sanitizer runtimes on the PATH.
 fn addSanitize(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -202,7 +203,8 @@ fn addSanitize(
         "-fPIC",
         "-fno-omit-frame-pointer",
         "-fsanitize=address,undefined",
-        "-fsanitize-recover=address,undefined",
+        // Every report ends the child process making the call.
+        "-fno-sanitize-recover=all",
         "-std=c99",
         "-D_GNU_SOURCE",
         "-ffp-contract=off",
@@ -235,15 +237,30 @@ fn addSanitize(
     const run = b.addSystemCommand(&.{"sh"});
     run.addFileArg(b.path("tools/sanitize.sh"));
     run.addArtifactArg(differential);
+    run.addFileArg(shared);
     const out = run.addOutputDirectoryArg("sanitize");
     run.has_side_effects = true;
     run.stdio = .inherit;
     const install = b.addInstallDirectory(.{
         .source_dir = out,
         .install_dir = .prefix,
-        .install_subdir = "sanitize",
+        .install_subdir = b.fmt("sanitize/{s}", .{runName(b, config.filters)}),
     });
     step.dependOn(&install.step);
+}
+
+/// A directory name for a run with `filters`: "all" without any, else the
+/// filters joined by "+", with every character other than letters, digits,
+/// '.', '_', '-' and '+' made a '-'.
+fn runName(b: *std.Build, filters: []const []const u8) []const u8 {
+    if (filters.len == 0) return "all";
+    const name = std.mem.join(b.allocator, "+", filters) catch @panic("OOM");
+    for (name) |*c| {
+        const kept = std.ascii.isAlphanumeric(c.*) or c.* == '.' or c.* == '_' or
+            c.* == '-' or c.* == '+';
+        if (!kept) c.* = '-';
+    }
+    return name;
 }
 
 const corpora = [_][]const u8{ "stb", "jpeg_decoder", "image_rs", "psd_tools", "libjpeg_turbo" };

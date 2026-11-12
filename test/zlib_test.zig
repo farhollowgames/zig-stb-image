@@ -56,26 +56,11 @@ fn expectSame(input: []const u8, call: Call, label: []const u8) !void {
     const buffer_theirs = whole_theirs[0..call.buffer_len];
     const buffer_ours = whole_ours[0..call.buffer_len];
 
-    if (fuzz_options.sanitize) {
-        std.debug.print("stbi-case: {s} call zlib {t} | initial {d} header {} buffer {d}\n", .{
-            label, call.function, call.initial_size, call.parse_header, call.buffer_len,
-        });
-    }
+    if (fuzz_options.sanitize) return sanitize(input, call, label, buffer_theirs, buffer_ours);
     var outlen: c_int = 0;
     var reason: ?[*:0]const u8 = null;
-    const returned = oracle.upstream.simd_zlib(
-        @backingInt(call.function),
-        input.ptr,
-        @intCast(input.len),
-        @intCast(call.initial_size),
-        @intFromBool(call.parse_header),
-        buffer_theirs.ptr,
-        @intCast(call.buffer_len),
-        &outlen,
-        &reason,
-    );
+    const returned = originalDecode(input, call, buffer_theirs, &outlen, &reason);
     defer oracle.upstream.simd_free(returned);
-    if (fuzz_options.sanitize) return;
 
     const theirs: Outcome = if (call.function.isBuffer())
         (if (outlen >= 0)
@@ -89,21 +74,7 @@ fn expectSame(input: []const u8, call: Call, label: []const u8) !void {
 
     var owned: ?[]u8 = null;
     defer if (owned) |o| gpa.free(o);
-    const result: zlib.Error![]const u8 = switch (call.function) {
-        .malloc_guesssize => zlib.decodeAlloc(gpa, input, .{ .initial_size = call.initial_size }),
-        .malloc => zlib.decodeAlloc(gpa, input, .{}),
-        .malloc_guesssize_headerflag => zlib.decodeAlloc(gpa, input, .{
-            .initial_size = call.initial_size,
-            .parse_header = call.parse_header,
-        }),
-        .noheader_malloc => zlib.decodeAlloc(gpa, input, .{ .parse_header = false }),
-        .buffer, .noheader_buffer => blk: {
-            const header = call.function == .buffer;
-            const n = zlib.decodeBuffer(buffer_ours, input, .{ .parse_header = header }) catch |err|
-                break :blk err;
-            break :blk buffer_ours[0..n];
-        },
-    };
+    const result = portDecode(input, call, buffer_ours);
     const ours: Outcome = if (result) |bytes| blk: {
         if (!call.function.isBuffer()) owned = @constCast(bytes);
         break :blk .{ .bytes = bytes };
@@ -158,6 +129,88 @@ fn expectSame(input: []const u8, call: Call, label: []const u8) !void {
         });
         return error.TestUnexpectedResult;
     }
+}
+
+/// The original's `call` on `input`. The caller frees the result.
+fn originalDecode(
+    input: []const u8,
+    call: Call,
+    buffer: []u8,
+    outlen: *c_int,
+    reason: *?[*:0]const u8,
+) ?[*]u8 {
+    return oracle.upstream.simd_zlib(
+        @backingInt(call.function),
+        input.ptr,
+        @intCast(input.len),
+        @intCast(call.initial_size),
+        @intFromBool(call.parse_header),
+        buffer.ptr,
+        @intCast(call.buffer_len),
+        outlen,
+        reason,
+    );
+}
+
+/// The port's `call` on `input`. The caller frees the result unless the
+/// call writes into `buffer`.
+fn portDecode(input: []const u8, call: Call, buffer: []u8) zlib.Error![]const u8 {
+    return switch (call.function) {
+        .malloc_guesssize => zlib.decodeAlloc(gpa, input, .{ .initial_size = call.initial_size }),
+        .malloc => zlib.decodeAlloc(gpa, input, .{}),
+        .malloc_guesssize_headerflag => zlib.decodeAlloc(gpa, input, .{
+            .initial_size = call.initial_size,
+            .parse_header = call.parse_header,
+        }),
+        .noheader_malloc => zlib.decodeAlloc(gpa, input, .{ .parse_header = false }),
+        .buffer, .noheader_buffer => blk: {
+            const header = call.function == .buffer;
+            const n = zlib.decodeBuffer(buffer, input, .{ .parse_header = header }) catch |err|
+                break :blk err;
+            break :blk buffer[0..n];
+        },
+    };
+}
+
+/// Under `zig build sanitize`: the original's `call` in a child process,
+/// and where a sanitizer flags it, what the port does (see
+/// `oracle.sanitizeCall`). The zlib code is the same in both builds of the
+/// original, so only one runs.
+fn sanitize(
+    input: []const u8,
+    call: Call,
+    label: []const u8,
+    buffer_theirs: []u8,
+    buffer_ours: []u8,
+) !void {
+    var label_buffer: [256]u8 = undefined;
+    const text = try std.fmt.bufPrint(
+        &label_buffer,
+        "{s}: zlib {t}, initial {d}, header {}, buffer {d}",
+        .{ label, call.function, call.initial_size, call.parse_header, call.buffer_len },
+    );
+    oracle.sanitizeStart(text);
+    const Original = struct {
+        input: []const u8,
+        call: Call,
+        buffer: []u8,
+
+        fn run(context: *const @This(), _: oracle.Path) void {
+            var outlen: c_int = 0;
+            var reason: ?[*:0]const u8 = null;
+            const c = context;
+            oracle.upstream.simd_free(originalDecode(c.input, c.call, c.buffer, &outlen, &reason));
+        }
+    };
+    const context: Original = .{ .input = input, .call = call, .buffer = buffer_theirs };
+    const flags = try oracle.runOriginal(Original, &context, Original.run, &.{.simd});
+    if (!flags.any()) return;
+    var outcome_buffer: [64]u8 = undefined;
+    const outcome = if (portDecode(input, call, buffer_ours)) |bytes| blk: {
+        if (!call.function.isBuffer()) gpa.free(bytes);
+        break :blk try std.fmt.bufPrint(&outcome_buffer, "accepts {d} bytes", .{bytes.len});
+    } else |err| try oracle.refusal(&outcome_buffer, err);
+    flags.print(text, outcome);
 }
 
 fn span(reason: ?[*:0]const u8) ?[]const u8 {
