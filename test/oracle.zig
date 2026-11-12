@@ -388,7 +388,10 @@ pub fn expectLoadSame(
     };
     if (refuse) {
         if (port == .image) {
-            const what = if (expect == .port_refuses) "is unsafe on" else "reads unwritten memory on";
+            const what = if (expect == .port_refuses)
+                "is unsafe on"
+            else
+                "reads unwritten memory on";
             label.print(request, "the port decoded an input the original {s}", .{what});
             return error.TestUnexpectedResult;
         }
