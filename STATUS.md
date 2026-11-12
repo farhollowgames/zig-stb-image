@@ -53,10 +53,10 @@ picks it up; the git log has the detail.
 | TGA | `stbi__tga_*` | `src/tga.zig` | | not started |
 | BMP | `stbi__bmp_*` | `src/bmp.zig` | | not started |
 | PSD (composited image, 8 and 16 bits, RLE and raw) | `stbi__psd_*` | `src/psd.zig` | | not started |
-| GIF, first frame | `stbi__gif_load` | `src/gif.zig` | | not started |
-| GIF, every frame | `stbi_load_gif_from_memory` | `loadGifFromMemory` | | not started |
-| HDR (Radiance RGBE, RLE and flat) | `stbi__hdr_*` | `src/hdr.zig` | | not started |
-| PIC (Softimage) | `stbi__pic_*` | `src/pic.zig` | | not started |
+| GIF, first frame | `stbi__gif_load` | `src/gif.zig` | `test/gif_test.zig`: the corpus, every LZW code size and stream shape, full code tables, corrupt rasters, interlace, palettes and transparency, frames off the canvas, extensions, headers, truncation, limits, allocation failures, 2,000 fuzz cases | oracle-tested |
+| GIF, every frame | `stbi_load_gif_from_memory` | `loadGifFromMemory` | as above, every test also as an animation: every disposal method, delays, frames kept after a failure; refusals in `doc/parity.md` | oracle-tested |
+| HDR (Radiance RGBE, RLE and flat) | `stbi__hdr_*` | `src/hdr.zig` | `test/hdr_test.zig`: the corpus, RLE and flat sizes, the old RLE form, bad runs, every header form, long header lines, truncation, gammas and scales, limits, allocation failures, 2,000 fuzz cases | oracle-tested |
+| PIC (Softimage) | `stbi__pic_*` | `src/pic.zig` | `test/pic_test.zig`: every packet type and channel layout, empty images, bad packets, overrunning and short scanlines, truncation, headers and info, limits, allocation failures, 3,000 fuzz cases | oracle-tested |
 | PNM (binary PGM and PPM, 8 and 16 bits) | `stbi__pnm_*` | `src/pnm.zig` | | not started |
 
 ## Functions
@@ -67,7 +67,7 @@ picks it up; the git log has the detail.
 | `stbi_load_from_callbacks`, `stbi_load_16_from_callbacks`, `stbi_loadf_from_callbacks`, `stbi_io_callbacks` | `loadFromReader` on a `*std.Io.Reader` | corpus files; fuzz cases | ported |
 | `stbi_load_from_file`, `stbi_load_from_file_16`, `stbi_loadf_from_file` | `loadFromFile` on a `*std.Io.File.Reader`, leaving it where the original leaves the `FILE` | corpus files; fuzz cases | ported |
 | `stbi_load`, `stbi_load_16`, `stbi_loadf` | `loadFromPath` | | ported |
-| `stbi_load_gif_from_memory` | `loadGifFromMemory` | | not started |
+| `stbi_load_gif_from_memory` | `loadGifFromMemory` | `test/gif_test.zig` | oracle-tested |
 | `stbi_info_from_memory`, `stbi_info_from_callbacks`, `stbi_info_from_file`, `stbi_info` | `infoFromMemory`, `infoFromReader`, `infoFromFile`, `infoFromPath` | corpus files; fuzz cases | ported |
 | `stbi_is_16_bit_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_16_bit` | `is16BitFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | ported |
 | `stbi_is_hdr_from_memory`, `…_from_callbacks`, `…_from_file`, `stbi_is_hdr` | `isHdrFromMemory`, `…FromReader`, `…FromFile`, `…FromPath` | as above | ported |
@@ -128,3 +128,16 @@ the tests of each case where the original is unsafe or never returns.
   zlib output past 2^31 bytes need gigabytes of input; the port fails both
   as the original does (the first sets no new reason, the second sets "outofmem"),
   checked by reading only.
+
+### GIF, HDR and PIC
+
+Inputs on which the original is unsafe or undefined, which the port refuses
+with an error (`doc/parity.md` has each one and its test):
+
+- GIF: restoring to the previous frame once two frames are out
+  (`GifDisposeToPrevious`); an animation of no pixels with several frames
+  (`GifZeroAreaFrames`); a flipped animation of fewer than 4 components
+  (`GifFlipComponents`); rows past the 32-bit range (`TooLargeGif`).
+- HDR: flat pixels that end early (`HdrTruncated`); info on a negative
+  size.
+- PIC: a packet or scanline failure loaded to other than 4 components.

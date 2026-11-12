@@ -10,6 +10,8 @@ const postprocess = @import("postprocess.zig");
 
 pub const settings = @import("settings.zig");
 pub const zlib = @import("zlib.zig");
+/// The C library's double `pow`, as the float conversions compute it.
+pub const pow = @import("pow.zig").pow;
 
 pub const Error = errors.Error;
 pub const failureReason = errors.failureReason;
@@ -332,6 +334,12 @@ pub fn loadGifFromMemory(
     var source: Source = .initMemory(bytes);
     var animation = try gif.loadAnimation(gpa, &source, &options);
     if (options.flip_vertically) {
+        // The original flips every frame as 4 components, whatever it
+        // converted them to: past its buffer once there are rows to swap.
+        if (animation.channels != 4 and animation.width > 0 and animation.height >= 2) {
+            animation.deinit(gpa);
+            return error.GifFlipComponents;
+        }
         const slice = @as(usize, animation.width) * animation.height * animation.channels;
         for (0..animation.frames) |frame| {
             const pixels = animation.pixels[frame * slice ..][0..slice];

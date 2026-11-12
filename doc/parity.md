@@ -1,9 +1,10 @@
-# Parity
+# Where the port differs from the original
 
-The inputs on which the original reads or writes out of bounds, is
-undefined, or never returns, and what the port does with them instead.
-Everywhere else the port gives the original's result byte for byte. Each
-case is awaiting the author's approval.
+The port gives the original's result on every input the original handles
+safely. Where the original reads out of bounds, reads uninitialized memory,
+frees twice or is otherwise undefined, the port returns an error instead.
+Each such case has a test, and the fuzz tests list the cases they generate
+in their `.unsafe` lists (`test/<format>_unsafe.zig`).
 
 ## zlib
 
@@ -38,3 +39,76 @@ case is awaiting the author's approval.
   (damaged case 11, two empty IDATs, and the next case, an empty IDAT
   before the data), and "png: IDAT data in many chunks, among ancillary
   chunks, decodes as in the original".
+
+## pow
+
+What the original does: the HDR to 8-bit conversion and the 8-bit to float
+conversion call the C library's `pow`, whose last bit differs between C
+libraries and builds of them.
+
+What the port does: `src/pow.zig` is glibc 2.44's x86-64 `pow`, with a fused
+multiply-add wherever the system's build (for x86-64-v3) uses one, so it
+gives that `pow`'s result bit for bit. The oracle keeps calling the system's
+`pow`; on another C library, or a glibc built without FMA, the original's
+float results can differ from the port's in the last bit.
+
+Tests: `pow matches the C library on every 8-bit input at the default
+gamma`, `… at 10,000 random gammas`, `… on every finite non-negative float at
+1 / 2.2`, `… on 10^7 random floats at random gammas`, `… on 10^7 random
+doubles`, `… on special values` (`test/pow_test.zig`).
+
+## GIF
+
+- **Restoring to the previous frame once two frames are out.** The original
+  keeps the frame before last behind its output buffer, at
+  `out - 2 * stride`, which points before the buffer; a frame with disposal
+  method 3 copies from there at the start of the next frame. The port
+  returns `error.GifDisposeToPrevious` for an animation where that copy would
+  happen: disposal 3 on the second frame or a later one that drew pixels.
+  The copy comes when the next frame is read, so the end of the file right
+  after such a frame is refused too. Disposal 3 on the first frame, or on a
+  frame that drew nothing, decodes as in the original. Tests: `a GIF that restores to the previous frame once two
+  frames are out is refused`, `a GIF restoring to the previous frame after
+  an empty frame decodes as in the original`; fuzz cases in
+  `test/gif_unsafe.zig`.
+- **An animation of no pixels with several frames.** The original grows its
+  frame buffer with `realloc(p, 0)`, which frees it on glibc, and then frees
+  it again. The port returns `error.GifZeroAreaFrames`. Test: `a GIF
+  animation of no pixels and more than one frame is refused`.
+- **Flipping an animation of fewer than 4 components.** The original flips
+  each frame as 4 components wide whatever was asked for, past the end of
+  its buffer. The port returns `error.GifFlipComponents` for a flipped
+  animation of 1 to 3 components, at least 1 wide and 2 high. Test: `a
+  flipped GIF animation of fewer than 4 components is refused`.
+- **A first frame that fails, with 1 to 3 components asked for.** The
+  original returns an empty, non-null buffer of 0 frames; the port returns
+  the failure. The oracle reads both as a failure.
+- **Rows past the 32-bit range.** The original's row position is an `int`
+  that would overflow on a frame of about 2^31 rows; the port returns
+  `error.TooLargeGif` there. There is no test: such a file needs gigabytes.
+- **A failed flipped load.** The original flips with frame counts it never
+  set; with the caller's values zeroed this flips nothing, and the port
+  flips nothing on a failure.
+
+## HDR
+
+- **Flat pixels that end early.** The original converts a pixel it could not
+  read from uninitialized stack memory. The port returns
+  `error.HdrTruncated`. Tests: `an HDR file whose flat pixels end early is
+  refused`; fuzz cases in `test/hdr_unsafe.zig`.
+- **Info on a negative size.** The original's info reports the width and
+  height the header gives, negative ones too. `Info` holds them unsigned, so
+  the port's info refuses those files. Test: `every HDR header form is read
+  as in the original`.
+
+## PIC
+
+- **A failure in the packets or the scanlines.** The original then converts
+  its null image to the components asked for. That returns the failure only
+  when the conversion keeps 4 components; otherwise it reads the null
+  image, or, when no components were asked for and the packets were not
+  read, uses the caller's `*comp` (an assert in a debug build). The port
+  returns the failure for every request. Tests: `PIC loads refuse a
+  scanline failure the original converts from a null image`, and every PIC
+  test, which compares the loads of 4 components and expects the port to
+  refuse the others; fuzz cases in `test/pic_unsafe.zig`.
